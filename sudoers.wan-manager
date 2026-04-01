@@ -1,0 +1,13 @@
+# Install to: /etc/sudoers.d/wan-manager
+# Permissions: chmod 440 /etc/sudoers.d/wan-manager
+
+# Replace 'www-data' with the user that runs the Node.js process (e.g. ubuntu, node)
+www-data ALL=(ALL) NOPASSWD: \
+  /sbin/ip, \
+  /sbin/iptables, \
+  /usr/bin/ping, \
+  /usr/bin/curl, \
+  /usr/bin/sysctl, \
+  /bin/systemctl restart isc-dhcp-server, \
+  /bin/systemctl restart wan-routes.service, \
+  /usr/local/bin/wan-setup.sh
