@@ -160,4 +160,34 @@ router.get('/sysinfo', (req, res) => {
   }
 });
 
+// GET /api/diagnostics/check-router?speedtest=0|1  — SSE, streams check-router output
+router.get('/check-router', (req, res) => {
+  sseSetup(res);
+
+  const args = ['/usr/local/bin/check-router'];
+  if (req.query.speedtest === '1') args.push('--speedtest');
+
+  sendSse(res, { type: 'start', label: 'check-router' });
+
+  const proc = spawn(args[0], args.slice(1), { timeout: 120000 });
+
+  proc.stdout.on('data', d => {
+    d.toString().split('\n').forEach(line => {
+      if (line) sendSse(res, { type: 'line', line });
+    });
+  });
+  proc.stderr.on('data', d => {
+    d.toString().split('\n').forEach(line => {
+      if (line) sendSse(res, { type: 'line', line });
+    });
+  });
+  proc.on('close', code => {
+    sendSse(res, { type: 'done', code });
+    sendSse(res, { type: 'end' });
+    res.end();
+  });
+
+  req.on('close', () => proc.kill());
+});
+
 module.exports = router;

@@ -10,6 +10,7 @@ import Diagnostics from './pages/Diagnostics.jsx';
 import Terminal from './pages/Terminal.jsx';
 import Services from './pages/Services.jsx';
 import FileManager from './pages/FileManager.jsx';
+import HealthCheck from './pages/HealthCheck.jsx';
 import Login from './pages/Login.jsx';
 import { ToastProvider } from './components/Toast.jsx';
 import './App.css';
@@ -30,6 +31,7 @@ function ProtectedLayout() {
           <Route path="/terminal"    element={<Terminal />} />
           <Route path="/services"    element={<Services />} />
           <Route path="/files"       element={<FileManager />} />
+          <Route path="/health"      element={<HealthCheck />} />
         </Routes>
       </main>
     </div>
