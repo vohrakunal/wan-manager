@@ -2,10 +2,11 @@ const router = require('express').Router();
 const fs = require('fs');
 const { readProcNetDev } = require('../lib/parser');
 const { exec } = require('child_process');
+const { NETWORK } = require('../lib/networkConfig');
 
 const INTERFACES = {
-  zte:     'eno1',
-  digisol: 'enx207bd51a8b0b',
+  zte: NETWORK.zte.iface,
+  digisol: NETWORK.digisol.iface,
 };
 
 const FAILOVER_LOG = process.env.FAILOVER_LOG || '/var/log/wan-failover.log';

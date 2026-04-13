@@ -2,9 +2,27 @@ const jwt = require('jsonwebtoken');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
 
-function authMiddleware(req, res, next) {
+function isStreamGetRequest(req) {
+  return req.method === 'GET' && req.path.startsWith('/stream/');
+}
+
+function getTokenFromRequest(req) {
   const header = req.headers['authorization'] || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (header.startsWith('Bearer ')) {
+    return header.slice(7);
+  }
+
+  // EventSource cannot send custom Authorization headers in browsers,
+  // so we allow query token only for stream endpoints.
+  if (isStreamGetRequest(req) && typeof req.query?.token === 'string' && req.query.token.length > 0) {
+    return req.query.token;
+  }
+
+  return null;
+}
+
+function authMiddleware(req, res, next) {
+  const token = getTokenFromRequest(req);
 
   if (!token) {
     return res.status(401).json({ error: 'Unauthorized: no token provided' });

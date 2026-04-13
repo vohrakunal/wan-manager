@@ -2,12 +2,7 @@ const router = require('express').Router();
 const { exec } = require('child_process');
 const { readProcNetDev } = require('../lib/parser');
 const ThroughputSnapshot = require('../models/ThroughputSnapshot');
-
-const INTERFACES = {
-  zte:     { iface: 'eno1',               gateway: '192.168.20.1', ip: '192.168.20.75' },
-  digisol: { iface: 'enx207bd51a8b0b',    gateway: '192.168.10.1', ip: '192.168.10.75' },
-  lan:     { iface: 'enx9c69d33a8e81',    ip: '192.168.1.254' },
-};
+const { NETWORK: INTERFACES } = require('../lib/networkConfig');
 
 // Cache for throughput rate calculation (needs two readings)
 let prevNetDev = null;
