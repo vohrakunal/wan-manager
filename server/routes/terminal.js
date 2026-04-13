@@ -57,7 +57,8 @@ const ALLOWED_CMDS = new Set([
   'ls',
   'pwd',
   'echo',
-  'help',
+  'help',,
+  'check-router'
 ]);
 
 function isAllowed(line) {
