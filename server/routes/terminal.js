@@ -27,6 +27,8 @@ const ALLOWED_CMDS = new Set([
   'wget',
   'iperf3',
   'iperf',
+  'speedtest',
+  'speedtest-cli',
   'cat',
   'tail',
   'grep',
