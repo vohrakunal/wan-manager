@@ -16,6 +16,7 @@ const ActionLog = require('../models/ActionLog');
 // an accidental click can't lock out the box.
 const ALLOWED_SERVICES = [
   'nginx',
+  'mongod',
   'isc-dhcp-server',
   'openvpn',
   'iperf3',
@@ -27,6 +28,7 @@ const ALLOWED_SERVICES = [
   'unbound',
   'vnstat',
   'sysstat',
+  'aria2',
   'cups',
   'bluetooth',
   'rsync',

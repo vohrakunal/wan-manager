@@ -9,6 +9,7 @@ const NAV = [
   { path: '/logs',        label: 'Live Logs',        icon: '📜' },
   { path: '/diagnostics', label: 'Diagnostics',      icon: '🔬' },
   { path: '/services',    label: 'Services',         icon: '⚙️' },
+  { path: '/files',       label: 'File Manager',     icon: '🗂️' },
   { path: '/terminal',    label: 'Terminal',         icon: '⌨️' },
 ];
 
