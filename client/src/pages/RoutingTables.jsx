@@ -139,7 +139,7 @@ export default function RoutingTables() {
       <ConfirmModal
         open={showConfirm}
         title="Fix Duplicate Rules"
-        message="This will flush all policy rules and re-add the correct ones. Active connections may be briefly interrupted."
+        message="This will remove only the duplicate WAN policy rules (while-loop delete, not flush) then re-add one correct rule each for ZTE and DIGISOL, rebuild their routing tables, and restore ECMP. System rules (local/main/default) are not touched."
         confirmLabel="Fix Now"
         danger
         onConfirm={handleFix}

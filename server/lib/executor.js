@@ -37,7 +37,31 @@ const ALLOWED_COMMANDS = {
   'set-zte-only':       `ip route replace default via ${zte.gateway} dev ${zte.iface}`,
   'set-digisol-only':   `ip route replace default via ${digisol.gateway} dev ${digisol.iface}`,
   'run-setup':          '/usr/local/bin/wan-setup.sh',
-  'route-fix':          `ip rule flush && ip rule add from ${zte.ip} table zte && ip rule add from ${digisol.ip} table digisol && ip route flush cache`,
+
+  // Safe duplicate-rule cleanup — removes ONLY the WAN-specific rules using
+  // a while loop (like wan-setup.sh does). NEVER uses ip rule flush, which
+  // would destroy the system local/main/default rules and break all routing.
+  'route-fix': [
+    // Remove duplicate ZTE rules (loop until none left)
+    `while ip rule del from ${zte.ip} table zte 2>/dev/null; do true; done`,
+    // Remove duplicate DIGISOL rules (loop until none left)
+    `while ip rule del from ${digisol.ip} table digisol 2>/dev/null; do true; done`,
+    // Re-add exactly one of each with correct priority
+    `ip rule add from ${zte.ip} table zte priority 100`,
+    `ip rule add from ${digisol.ip} table digisol priority 100`,
+    // Fix ZTE policy table routes
+    `ip route flush table zte`,
+    `ip route add default via ${zte.gateway} dev ${zte.iface} table zte`,
+    `ip route add ${zte.ip.replace(/\.\d+$/, '.0')}/24 dev ${zte.iface} src ${zte.ip} table zte`,
+    // Fix DIGISOL policy table routes
+    `ip route flush table digisol`,
+    `ip route add default via ${digisol.gateway} dev ${digisol.iface} table digisol`,
+    `ip route add ${digisol.ip.replace(/\.\d+$/, '.0')}/24 dev ${digisol.iface} src ${digisol.ip} table digisol`,
+    // Restore ECMP default route
+    `ip route replace default nexthop via ${zte.gateway} dev ${zte.iface} weight 1 nexthop via ${digisol.gateway} dev ${digisol.iface} weight 1`,
+    // Flush route cache
+    `ip route flush cache`,
+  ].join(' && '),
 
   // Services
   'restart-dhcp':       'systemctl restart isc-dhcp-server',
@@ -53,9 +77,12 @@ function runCommand(key, { user = 'system', note = '' } = {}) {
     if (!cmd) return reject(new Error(`Command key '${key}' not allowed`));
 
     const needsPrivilege = PRIVILEGED_COMMANDS.has(key);
-    const commandToRun = needsPrivilege ? `sudo -n ${cmd}` : cmd;
+    // route-fix uses shell builtins (while loop) so must run inside bash -c
+    const commandToRun = key === 'route-fix'
+      ? `sudo -n bash -c ${JSON.stringify(cmd)}`
+      : needsPrivilege ? `sudo -n ${cmd}` : cmd;
 
-    exec(commandToRun, { timeout: 15000 }, async (err, stdout, stderr) => {
+    exec(commandToRun, { timeout: key === 'route-fix' ? 30000 : 15000 }, async (err, stdout, stderr) => {
       const output = stdout ? stdout.trim() : '';
       const error  = stderr ? stderr.trim() : '';
 
