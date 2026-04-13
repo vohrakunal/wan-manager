@@ -6,6 +6,9 @@ import Failover from './pages/Failover.jsx';
 import RoutingTables from './pages/RoutingTables.jsx';
 import DhcpLeases from './pages/DhcpLeases.jsx';
 import LiveLogs from './pages/LiveLogs.jsx';
+import Diagnostics from './pages/Diagnostics.jsx';
+import Terminal from './pages/Terminal.jsx';
+import Services from './pages/Services.jsx';
 import Login from './pages/Login.jsx';
 import { ToastProvider } from './components/Toast.jsx';
 import './App.css';
@@ -16,12 +19,15 @@ function ProtectedLayout() {
       <Sidebar />
       <main className="app-main">
         <Routes>
-          <Route path="/"         element={<Navigate to="/dashboard" replace />} />
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/failover"  element={<Failover />} />
-          <Route path="/routing"   element={<RoutingTables />} />
-          <Route path="/dhcp"      element={<DhcpLeases />} />
-          <Route path="/logs"      element={<LiveLogs />} />
+          <Route path="/"            element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard"   element={<Dashboard />} />
+          <Route path="/failover"    element={<Failover />} />
+          <Route path="/routing"     element={<RoutingTables />} />
+          <Route path="/dhcp"        element={<DhcpLeases />} />
+          <Route path="/logs"        element={<LiveLogs />} />
+          <Route path="/diagnostics" element={<Diagnostics />} />
+          <Route path="/terminal"    element={<Terminal />} />
+          <Route path="/services"    element={<Services />} />
         </Routes>
       </main>
     </div>

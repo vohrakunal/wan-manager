@@ -55,4 +55,8 @@ export const getFailoverLog  = (lines = 200) => api.get(`/logs/failover?lines=${
 export const getManagerLog   = (lines = 200) => api.get(`/logs/manager?lines=${lines}`);
 export const getActionLogs   = (limit = 50)  => api.get(`/logs/actions?limit=${limit}`);
 
+// Services
+export const getServices        = ()                       => api.get('/services');
+export const serviceAction      = (name, action)           => api.post(`/services/${encodeURIComponent(name)}/${action}`);
+
 export default api;

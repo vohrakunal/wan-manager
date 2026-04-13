@@ -2,11 +2,14 @@ import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 
 const NAV = [
-  { path: '/dashboard', label: 'Dashboard',       icon: '📡' },
-  { path: '/failover',  label: 'Failover',         icon: '⚡' },
-  { path: '/routing',   label: 'Routing Tables',   icon: '🔀' },
-  { path: '/dhcp',      label: 'DHCP Leases',      icon: '🖥️' },
-  { path: '/logs',      label: 'Live Logs',        icon: '📜' },
+  { path: '/dashboard',   label: 'Dashboard',       icon: '📡' },
+  { path: '/failover',    label: 'WAN Control',      icon: '⚡' },
+  { path: '/routing',     label: 'Routing Tables',   icon: '🔀' },
+  { path: '/dhcp',        label: 'DHCP Leases',      icon: '🖥️' },
+  { path: '/logs',        label: 'Live Logs',        icon: '📜' },
+  { path: '/diagnostics', label: 'Diagnostics',      icon: '🔬' },
+  { path: '/services',    label: 'Services',         icon: '⚙️' },
+  { path: '/terminal',    label: 'Terminal',         icon: '⌨️' },
 ];
 
 export default function Sidebar() {

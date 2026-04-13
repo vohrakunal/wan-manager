@@ -3,7 +3,10 @@ const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
 
 function isStreamGetRequest(req) {
-  return req.method === 'GET' && req.path.startsWith('/stream/');
+  return req.method === 'GET' && (
+    req.path.startsWith('/stream/') ||
+    req.path.startsWith('/diagnostics/')
+  );
 }
 
 function getTokenFromRequest(req) {

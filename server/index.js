@@ -1,4 +1,5 @@
 require('dotenv').config({ path: '../.env' });
+const http = require('http');
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
@@ -12,8 +13,12 @@ const dhcpRoutes = require('./routes/dhcp');
 const routingRoutes = require('./routes/routing');
 const logsRoutes = require('./routes/logs');
 const streamRoutes = require('./routes/stream');
+const diagnosticsRoutes = require('./routes/diagnostics');
+const servicesRoutes    = require('./routes/services');
+const { setupTerminalWss } = require('./routes/terminal');
 
 const app = express();
+const server = http.createServer(app);
 const PORT = process.env.PORT || 8080;
 const HOST = process.env.HOST || '0.0.0.0';
 
@@ -39,6 +44,11 @@ app.use('/api/dhcp', dhcpRoutes);
 app.use('/api/routing', routingRoutes);
 app.use('/api/logs', logsRoutes);
 app.use('/api/stream', streamRoutes);
+app.use('/api/diagnostics', diagnosticsRoutes);
+app.use('/api/services',    servicesRoutes);
+
+// WebSocket terminal
+setupTerminalWss(server);
 
 // Serve React build in production
 if (process.env.NODE_ENV === 'production') {
@@ -48,6 +58,6 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
-app.listen(PORT, HOST, () => {
+server.listen(PORT, HOST, () => {
   console.log(`WAN Manager running on http://${HOST}:${PORT}`);
 });

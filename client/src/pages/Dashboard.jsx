@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import WanCard from '../components/WanCard.jsx';
+import SysInfo from '../components/SysInfo.jsx';
 import { getWanStatus, getWanPublicIp, getThroughputHistory } from '../api/index.js';
 
 function ModeBar({ mode }) {
@@ -127,6 +128,11 @@ export default function Dashboard() {
       <div className="grid-2">
         <WanCard label="ZTE (WAN 1)"     isp="Netplus Broadband"  wan={zteData}     history={history.zte} />
         <WanCard label="DIGISOL (WAN 2)" isp="Falconet Internet"  wan={digisolData} history={history.digisol} />
+      </div>
+
+      {/* System Info */}
+      <div className="section-gap" style={{ marginTop: 20 }}>
+        <SysInfo />
       </div>
     </div>
   );
