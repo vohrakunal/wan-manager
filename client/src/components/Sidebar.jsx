@@ -6,6 +6,7 @@ const NAV = [
   { path: '/failover',    label: 'WAN Control',      icon: '⚡' },
   { path: '/routing',     label: 'Routing Tables',   icon: '🔀' },
   { path: '/dhcp',        label: 'DHCP Leases',      icon: '🖥️' },
+  { path: '/clients',     label: 'Network Clients',  icon: '📊' },
   { path: '/logs',        label: 'Live Logs',        icon: '📜' },
   { path: '/health',      label: 'Health Check',     icon: '🩺' },
   { path: '/diagnostics', label: 'Diagnostics',      icon: '🔬' },

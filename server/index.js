@@ -16,6 +16,7 @@ const streamRoutes = require('./routes/stream');
 const diagnosticsRoutes = require('./routes/diagnostics');
 const servicesRoutes    = require('./routes/services');
 const filesRoutes       = require('./routes/files');
+const networkRoutes     = require('./routes/network');
 const { setupTerminalWss } = require('./routes/terminal');
 
 const app = express();
@@ -48,6 +49,7 @@ app.use('/api/stream', streamRoutes);
 app.use('/api/diagnostics', diagnosticsRoutes);
 app.use('/api/services',    servicesRoutes);
 app.use('/api/files',       filesRoutes);
+app.use('/api/network',     networkRoutes);
 
 // WebSocket terminal
 setupTerminalWss(server);

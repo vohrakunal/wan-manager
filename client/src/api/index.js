@@ -59,4 +59,9 @@ export const getActionLogs   = (limit = 50)  => api.get(`/logs/actions?limit=${l
 export const getServices        = ()                       => api.get('/services');
 export const serviceAction      = (name, action)           => api.post(`/services/${encodeURIComponent(name)}/${action}`);
 
+// Network clients & WAN sessions
+export const getLanClients    = ()  => api.get('/network/clients');
+export const resetBwCounters  = ()  => api.post('/network/clients/reset');
+export const getWanSessions   = ()  => api.get('/network/wan-sessions');
+
 export default api;
