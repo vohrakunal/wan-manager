@@ -53,7 +53,8 @@ export default function SysInfo() {
 
   if (!info) return null;
 
-  const cpuColor = info.cpuPct > 80 ? 'var(--red)' : info.cpuPct > 50 ? 'var(--yellow)' : 'var(--green)';
+  const cpuColor  = info.cpuPct  > 80 ? 'var(--red)' : info.cpuPct  > 50 ? 'var(--yellow)' : 'var(--green)';
+  const tempColor = info.cpuTemp > 80 ? 'var(--red)' : info.cpuTemp > 65 ? 'var(--yellow)' : 'var(--text2)';
   const memColor = info.memPct > 85 ? 'var(--red)' : info.memPct > 60 ? 'var(--yellow)' : 'var(--accent)';
 
   return (
@@ -77,6 +78,11 @@ export default function SysInfo() {
           <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 2 }}>
             Load: {info.loadAvg?.join(' / ')}
           </div>
+          {info.cpuTemp != null && (
+            <div style={{ fontSize: 11, color: tempColor, marginTop: 2 }}>
+              Temp: {info.cpuTemp}°C
+            </div>
+          )}
         </div>
 
         {/* Memory */}

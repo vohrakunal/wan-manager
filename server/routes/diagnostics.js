@@ -139,6 +139,23 @@ router.get('/sysinfo', (req, res) => {
         cpuPct = dTotal > 0 ? Math.round((1 - dIdle / dTotal) * 1000) / 10 : 0;
       }
 
+      // Read CPU temperature from thermal zones
+      let cpuTemp = null;
+      const thermalPaths = [
+        '/sys/class/thermal/thermal_zone0/temp',
+        '/sys/class/thermal/thermal_zone1/temp',
+        '/sys/class/hwmon/hwmon0/temp1_input',
+      ];
+      for (const p of thermalPaths) {
+        try {
+          const raw = parseInt(fs.readFileSync(p, 'utf8').trim(), 10);
+          if (!isNaN(raw) && raw > 0) {
+            cpuTemp = Math.round(raw / 100) / 10; // millidegrees → °C
+            break;
+          }
+        } catch {}
+      }
+
       res.json({
         hostname: os.hostname(),
         platform: os.platform(),
@@ -148,6 +165,7 @@ router.get('/sysinfo', (req, res) => {
         cpuModel: cpus[0]?.model || 'unknown',
         cpuCount: cpus.length,
         cpuPct,
+        cpuTemp,
         loadAvg: loadAvg.map(v => Math.round(v * 100) / 100),
         totalMem,
         freeMem,
