@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getLanClients, getWanSessions } from '../api/index.js';
+import { getLanClients, resetBwCounters, getWanSessions } from '../api/index.js';
 import { useToast } from '../components/Toast.jsx';
 
 // ──────────────────────────────────────────────
@@ -40,9 +40,10 @@ const TABS = [
 // LAN Clients section
 // ──────────────────────────────────────────────
 function LanSection({ toast }) {
-  const [data, setData]       = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [filter, setFilter]   = useState('');
+  const [data, setData]         = useState(null);
+  const [loading, setLoading]   = useState(true);
+  const [filter, setFilter]     = useState('');
+  const [resetting, setResetting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -61,6 +62,19 @@ function LanSection({ toast }) {
     const t = setInterval(load, 15000);
     return () => clearInterval(t);
   }, [load]);
+
+  async function handleReset() {
+    setResetting(true);
+    try {
+      await resetBwCounters();
+      toast('Bandwidth counters reset', 'success');
+      load();
+    } catch (err) {
+      toast(err.response?.data?.error || 'Reset failed', 'error');
+    } finally {
+      setResetting(false);
+    }
+  }
 
   const clients = data?.clients || [];
   const filtered = filter
@@ -91,11 +105,11 @@ function LanSection({ toast }) {
               <div style={{ fontWeight: 600 }}><code>{data.lanIp}</code></div>
             </div>
             <div>
-              <div style={{ fontSize: 11, color: 'var(--text2)', marginBottom: 3, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Data Source</div>
+              <div style={{ fontSize: 11, color: 'var(--text2)', marginBottom: 3, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Counters</div>
               <div>
                 {data.countersActive
-                  ? <span className="badge badge-green">conntrack</span>
-                  : <span className="badge badge-yellow">No data yet</span>}
+                  ? <span className="badge badge-green">Active</span>
+                  : <span className="badge badge-yellow">Warming up…</span>}
               </div>
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center' }}>
@@ -108,7 +122,7 @@ function LanSection({ toast }) {
       )}
 
       {/* Controls */}
-      <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
         <input
           placeholder="Filter by IP, MAC, or hostname…"
           value={filter}
@@ -116,15 +130,24 @@ function LanSection({ toast }) {
           style={{ maxWidth: 280 }}
         />
         <button className="btn-secondary" onClick={load} disabled={loading}>↺ Refresh</button>
+        <button
+          className="btn-secondary"
+          onClick={handleReset}
+          disabled={resetting}
+          style={{ marginLeft: 'auto' }}
+          title="Zero iptables counters to start a fresh measurement window"
+        >
+          {resetting ? <span className="spinner" /> : '⟳ Reset Counters'}
+        </button>
       </div>
 
-      {/* No data notice */}
+      {/* Warming notice */}
       {data && !data.countersActive && (
         <div style={{
           background: 'rgba(240,180,41,0.08)', border: '1px solid rgba(240,180,41,0.25)',
           borderRadius: 8, padding: '10px 14px', marginBottom: 14, fontSize: 12, color: 'var(--yellow)',
         }}>
-          No conntrack data available. Ensure <code>conntrack</code> is installed (<code>apt install conntrack</code>) and the server has <code>CAP_NET_ADMIN</code>. Bytes will populate once tracked connections exist.
+          iptables rules inserted — waiting for forwarded traffic. Bytes will appear as devices use the network. Reload in a few seconds.
         </div>
       )}
 
@@ -182,7 +205,7 @@ function LanSection({ toast }) {
         )}
         {data && (
           <div style={{ padding: '8px 14px', fontSize: 11, color: 'var(--text2)', borderTop: '1px solid var(--border)' }}>
-            {clients.length} device{clients.length !== 1 ? 's' : ''} online · Bytes aggregated from conntrack (all active connections) · Auto-refreshes every 15s
+            {clients.length} device{clients.length !== 1 ? 's' : ''} online · Cumulative bytes via iptables accounting · Auto-refreshes every 15s
           </div>
         )}
       </div>

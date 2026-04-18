@@ -1,6 +1,6 @@
 /**
- * GET /api/network/clients        — LAN devices with bandwidth usage (from conntrack)
- * GET /api/network/wan-sessions   — Active WAN (internet) connections
+ * GET /api/network/clients      — LAN devices with bandwidth (iptables accounting)
+ * GET /api/network/wan-sessions — Who is connected to local services (ss)
  */
 const router = require('express').Router();
 const { exec } = require('child_process');
@@ -8,7 +8,9 @@ const fs = require('fs');
 const { NETWORK } = require('../lib/networkConfig');
 const { parseLeases } = require('../lib/parser');
 
-function execAsync(cmd, timeout = 15000) {
+const CHAIN = 'NMT_BW';
+
+function execAsync(cmd, timeout = 10000) {
   return new Promise((resolve, reject) => {
     exec(cmd, { timeout }, (err, stdout, stderr) => {
       if (err) return reject(stderr || err.message);
@@ -41,52 +43,66 @@ function readArpTable() {
 }
 
 // ──────────────────────────────────────────────
-// conntrack → per-LAN-IP byte totals
-// conntrack -L dumps all tracked connections with byte counters.
-// Each line has two directions; we attribute:
-//   src=<LAN-IP> ... → txBytes (device sent)
-//   dst=<LAN-IP> ... → rxBytes (device received)
+// iptables accounting — idempotent setup + read
 // ──────────────────────────────────────────────
-async function getBandwidthFromConntrack(lanSubnet) {
-  const byIp = {};
 
+// Ensure chain exists and is hooked into FORWARD
+async function ensureChain(lanIface) {
+  // Create chain (ignore error if exists)
+  await execAsync(`iptables -N ${CHAIN} 2>/dev/null; true`).catch(() => {});
+
+  // Hook into FORWARD for inbound (to LAN) and outbound (from LAN)
+  for (const [flag, iface] of [['-i', lanIface], ['-o', lanIface]]) {
+    const check = await execAsync(
+      `iptables -C FORWARD ${flag} ${iface} -j ${CHAIN} 2>&1`
+    ).catch(e => e.toString());
+    if (check.includes('No chain') || check.includes('does a matching') || check.includes('no rule')) {
+      await execAsync(`iptables -I FORWARD 1 ${flag} ${iface} -j ${CHAIN}`).catch(() => {});
+    }
+  }
+}
+
+// Ensure a per-IP rule exists in the chain (src + dst)
+async function ensureIpRules(ips) {
+  // Read current chain rules once to avoid N×2 check calls
+  let existing = '';
   try {
-    // conntrack -L outputs all protocols; -o extended gives byte/packet counts
-    const out = await execAsync('conntrack -L -o extended 2>/dev/null', 12000);
-    for (const line of out.split('\n')) {
-      if (!line.trim()) continue;
+    existing = await execAsync(`iptables -L ${CHAIN} -n 2>/dev/null`);
+  } catch {}
 
-      // Each conntrack line has two directions separated by a blank-ish boundary.
-      // Pattern: src=X dst=Y sport=A dport=B packets=N bytes=M [UNREPLIED] src=Y dst=X ...
-      // We parse all src=/dst=/bytes= tokens in order.
-      const tokens = line.matchAll(/(\w+)=([\d.:a-fA-F]+)/g);
-      const pairs = [];
-      for (const m of tokens) pairs.push({ k: m[1], v: m[2] });
+  for (const ip of ips) {
+    if (!existing.includes(`source: ${ip}`) && !existing.includes(`s=${ip}`) && !existing.includes(ip)) {
+      await execAsync(`iptables -A ${CHAIN} -s ${ip}`).catch(() => {});
+      await execAsync(`iptables -A ${CHAIN} -d ${ip}`).catch(() => {});
+    }
+  }
+}
 
-      // Walk through key=value pairs and collect (src, dst, bytes) tuples per direction
-      let curSrc = null, curDst = null;
-      for (const { k, v } of pairs) {
-        if (k === 'src') curSrc = v;
-        else if (k === 'dst') curDst = v;
-        else if (k === 'bytes') {
-          const b = parseInt(v, 10);
-          if (curSrc && curSrc.startsWith(lanSubnet)) {
-            byIp[curSrc] = byIp[curSrc] || { txBytes: 0, rxBytes: 0 };
-            byIp[curSrc].txBytes += b;
-          }
-          if (curDst && curDst.startsWith(lanSubnet)) {
-            byIp[curDst] = byIp[curDst] || { txBytes: 0, rxBytes: 0 };
-            byIp[curDst].rxBytes += b;
-          }
-          // reset for next direction pair
-          curSrc = null; curDst = null;
-        }
+// Read byte counters from the chain
+async function readChainCounters() {
+  const byIp = {};
+  try {
+    // -x = exact bytes, -v = verbose (shows bytes), -n = numeric
+    const out = await execAsync(`iptables -L ${CHAIN} -v -n -x 2>/dev/null`);
+    for (const line of out.split('\n').slice(2)) { // skip 2-line header
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 9) continue;
+      const bytes = parseInt(parts[1], 10);
+      if (isNaN(bytes)) continue;
+      const src = parts[7]; // source
+      const dst = parts[8]; // destination
+      // src rule → device is sending (TX)
+      if (src && src !== '0.0.0.0/0' && !src.includes('/')) {
+        byIp[src] = byIp[src] || { txBytes: 0, rxBytes: 0 };
+        byIp[src].txBytes += bytes;
+      }
+      // dst rule → device is receiving (RX)
+      if (dst && dst !== '0.0.0.0/0' && !dst.includes('/')) {
+        byIp[dst] = byIp[dst] || { txBytes: 0, rxBytes: 0 };
+        byIp[dst].rxBytes += bytes;
       }
     }
-  } catch {
-    // conntrack not available or failed — return empty (UI shows 0 B gracefully)
-  }
-
+  } catch {}
   return byIp;
 }
 
@@ -95,25 +111,28 @@ async function getBandwidthFromConntrack(lanSubnet) {
 // ──────────────────────────────────────────────
 router.get('/clients', async (req, res) => {
   try {
-    const lanIface = NETWORK.lan.iface;
-    const lanSubnet = NETWORK.lan.ip.replace(/\.\d+$/, '.'); // e.g. "192.168.1."
+    const lanIface  = NETWORK.lan.iface;
 
-    // ARP table for live LAN devices
+    // 1. Discover live LAN devices from ARP
     const arpDevices = readArpTable();
     const lanDevices = Object.values(arpDevices).filter(d => d.iface === lanIface);
 
-    // DHCP leases for hostnames
+    // 2. DHCP leases for hostnames
     const leases = parseLeases();
-    const leaseByMac = {};
-    const leaseByIp  = {};
-    for (const l of leases) {
-      leaseByMac[l.mac] = l;
-      leaseByIp[l.ip]   = l;
+    const leaseByMac = {}, leaseByIp = {};
+    for (const l of leases) { leaseByMac[l.mac] = l; leaseByIp[l.ip] = l; }
+
+    // 3. Ensure iptables chain + per-device rules exist
+    await ensureChain(lanIface);
+    if (lanDevices.length > 0) {
+      await ensureIpRules(lanDevices.map(d => d.ip));
     }
 
-    // conntrack byte totals per IP — immediate, no warm-up needed
-    const bwByIp = await getBandwidthFromConntrack(lanSubnet);
+    // 4. Read counters
+    const bwByIp = await readChainCounters();
+    const hasData = Object.values(bwByIp).some(v => v.txBytes > 0 || v.rxBytes > 0);
 
+    // 5. Build response
     const clients = lanDevices.map(d => {
       const lease = leaseByMac[d.mac] || leaseByIp[d.ip];
       const bw    = bwByIp[d.ip] || { txBytes: 0, rxBytes: 0 };
@@ -127,17 +146,28 @@ router.get('/clients', async (req, res) => {
         totalBytes: bw.txBytes + bw.rxBytes,
       };
     });
-
     clients.sort((a, b) => b.totalBytes - a.totalBytes);
 
     res.json({
       clients,
       lanIface,
-      lanIp: NETWORK.lan.ip,
-      countersActive: Object.keys(bwByIp).length > 0,
-      dataSource: 'conntrack',
-      timestamp: new Date().toISOString(),
+      lanIp:          NETWORK.lan.ip,
+      countersActive: hasData,
+      dataSource:     'iptables',
+      timestamp:      new Date().toISOString(),
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+// ──────────────────────────────────────────────
+// POST /api/network/clients/reset — zero counters
+// ──────────────────────────────────────────────
+router.post('/clients/reset', async (req, res) => {
+  try {
+    await execAsync(`iptables -Z ${CHAIN}`);
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message || String(err) });
   }
