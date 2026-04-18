@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getLanClients, resetBwCounters, getWanSessions } from '../api/index.js';
+import { getLanClients, getWanSessions } from '../api/index.js';
 import { useToast } from '../components/Toast.jsx';
 
 // ──────────────────────────────────────────────
@@ -40,10 +40,9 @@ const TABS = [
 // LAN Clients section
 // ──────────────────────────────────────────────
 function LanSection({ toast }) {
-  const [data, setData]         = useState(null);
-  const [loading, setLoading]   = useState(true);
-  const [filter, setFilter]     = useState('');
-  const [resetting, setResetting] = useState(false);
+  const [data, setData]       = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter]   = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -62,19 +61,6 @@ function LanSection({ toast }) {
     const t = setInterval(load, 15000);
     return () => clearInterval(t);
   }, [load]);
-
-  async function handleReset() {
-    setResetting(true);
-    try {
-      await resetBwCounters();
-      toast('Bandwidth counters reset', 'success');
-      load();
-    } catch (err) {
-      toast(err.response?.data?.error || 'Reset failed', 'error');
-    } finally {
-      setResetting(false);
-    }
-  }
 
   const clients = data?.clients || [];
   const filtered = filter
@@ -129,25 +115,24 @@ function LanSection({ toast }) {
           onChange={e => setFilter(e.target.value)}
           style={{ maxWidth: 280 }}
         />
-        <button className="btn-secondary" onClick={load} disabled={loading}>↺ Refresh</button>
-        <button
-          className="btn-secondary"
-          onClick={handleReset}
-          disabled={resetting}
-          style={{ marginLeft: 'auto' }}
-          title="Zero iptables counters to start a fresh measurement window"
-        >
-          {resetting ? <span className="spinner" /> : '⟳ Reset Counters'}
-        </button>
+        <button className="btn-secondary" onClick={load} disabled={loading} style={{ marginLeft: 'auto' }}>↺ Refresh</button>
       </div>
 
-      {/* Warming notice */}
-      {data && !data.countersActive && (
+      {/* No bandwidth data notice */}
+      {data && !data.nfConntrackAvailable && (
         <div style={{
           background: 'rgba(240,180,41,0.08)', border: '1px solid rgba(240,180,41,0.25)',
           borderRadius: 8, padding: '10px 14px', marginBottom: 14, fontSize: 12, color: 'var(--yellow)',
         }}>
-          iptables rules inserted — waiting for forwarded traffic. Bytes will appear as devices use the network. Reload in a few seconds.
+          Bandwidth data unavailable — <code>/proc/net/nf_conntrack</code> is not readable. Device list and hostnames are still shown from ARP + DHCP leases.
+        </div>
+      )}
+      {data && data.nfConntrackAvailable && !data.countersActive && (
+        <div style={{
+          background: 'rgba(47,129,247,0.06)', border: '1px solid rgba(47,129,247,0.2)',
+          borderRadius: 8, padding: '10px 14px', marginBottom: 14, fontSize: 12, color: 'var(--accent2)',
+        }}>
+          Conntrack available — bytes will populate as devices make connections. Reload in a moment.
         </div>
       )}
 
@@ -338,16 +323,15 @@ function WanSection({ toast }) {
                 <tr>
                   <th>Service</th>
                   <th>Port</th>
-                  <th>Connected From</th>
-                  <th>Hostname</th>
-                  <th>Process</th>
+                  <th>Connected From (IP)</th>
                   <th>Origin</th>
+                  <th>Process</th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text2)', padding: 32 }}>
+                    <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text2)', padding: 32 }}>
                       {sessions.length === 0
                         ? 'No active service connections found. SSH, FTP, Nginx, MongoDB connections will appear here.'
                         : 'No connections match filter'}
@@ -357,19 +341,22 @@ function WanSection({ toast }) {
                   <tr key={i}>
                     <td><ServiceBadge name={s.service} category={s.category} /></td>
                     <td><code style={{ color: 'var(--text2)', fontSize: 12 }}>{s.localPort}</code></td>
-                    <td><code style={{ color: 'var(--accent)', fontSize: 12 }}>{s.remoteIp}:{s.remotePort}</code></td>
-                    <td style={{ color: s.hostname ? 'var(--text)' : 'var(--text2)', fontSize: 13 }}>
-                      {s.hostname || <span style={{ fontStyle: 'italic' }}>unknown</span>}
-                    </td>
                     <td>
-                      {s.process
-                        ? <code style={{ fontSize: 11, color: 'var(--text2)' }}>{s.process}</code>
-                        : <span style={{ color: 'var(--text2)' }}>—</span>}
+                      <code style={{ color: 'var(--accent)', fontSize: 13, fontWeight: 600 }}>{s.remoteIp}</code>
+                      <span style={{ fontSize: 11, color: 'var(--text2)', marginLeft: 4 }}>:{s.remotePort}</span>
+                      {s.hostname && (
+                        <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 1 }}>{s.hostname}</div>
+                      )}
                     </td>
                     <td>
                       {s.isLan
                         ? <span className="badge badge-blue">LAN</span>
                         : <span className="badge badge-yellow">WAN</span>}
+                    </td>
+                    <td>
+                      {s.process
+                        ? <code style={{ fontSize: 11, color: 'var(--text2)' }}>{s.process}</code>
+                        : <span style={{ color: 'var(--text2)' }}>—</span>}
                     </td>
                   </tr>
                 ))}
