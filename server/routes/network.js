@@ -1,7 +1,6 @@
 /**
- * GET /api/network/clients        — LAN devices with bandwidth usage
+ * GET /api/network/clients        — LAN devices with bandwidth usage (from conntrack)
  * GET /api/network/wan-sessions   — Active WAN (internet) connections
- * POST /api/network/clients/reset — Reset iptables byte counters
  */
 const router = require('express').Router();
 const { exec } = require('child_process');
@@ -9,7 +8,7 @@ const fs = require('fs');
 const { NETWORK } = require('../lib/networkConfig');
 const { parseLeases } = require('../lib/parser');
 
-function execAsync(cmd, timeout = 10000) {
+function execAsync(cmd, timeout = 15000) {
   return new Promise((resolve, reject) => {
     exec(cmd, { timeout }, (err, stdout, stderr) => {
       if (err) return reject(stderr || err.message);
@@ -24,7 +23,7 @@ function execAsync(cmd, timeout = 10000) {
 function readArpTable() {
   try {
     const content = fs.readFileSync('/proc/net/arp', 'utf8');
-    const lines = content.split('\n').slice(1); // skip header
+    const lines = content.split('\n').slice(1);
     const devices = {};
     for (const line of lines) {
       const parts = line.trim().split(/\s+/);
@@ -42,72 +41,53 @@ function readArpTable() {
 }
 
 // ──────────────────────────────────────────────
-// iptables accounting — ensure chains exist and
-// add a rule per LAN client if not already there
+// conntrack → per-LAN-IP byte totals
+// conntrack -L dumps all tracked connections with byte counters.
+// Each line has two directions; we attribute:
+//   src=<LAN-IP> ... → txBytes (device sent)
+//   dst=<LAN-IP> ... → rxBytes (device received)
 // ──────────────────────────────────────────────
-const CHAIN = 'NMT_BW';
+async function getBandwidthFromConntrack(lanSubnet) {
+  const byIp = {};
 
-async function ensureIptablesChain(lanIface) {
   try {
-    // Create chain if missing
-    await execAsync(`iptables -N ${CHAIN} 2>/dev/null; true`);
-    // Hook into FORWARD if not already
-    const rules = await execAsync(`iptables -C FORWARD -i ${lanIface} -j ${CHAIN} 2>&1`).catch(() => 'missing');
-    if (rules.includes('missing') || rules.includes('No chain')) {
-      await execAsync(`iptables -I FORWARD 1 -i ${lanIface} -j ${CHAIN}`);
-    }
-    const rulesOut = await execAsync(`iptables -C FORWARD -o ${lanIface} -j ${CHAIN} 2>&1`).catch(() => 'missing');
-    if (rulesOut.includes('missing') || rulesOut.includes('No chain')) {
-      await execAsync(`iptables -I FORWARD 2 -o ${lanIface} -j ${CHAIN}`);
-    }
-  } catch {
-    // non-fatal — may not have iptables
-  }
-}
+    // conntrack -L outputs all protocols; -o extended gives byte/packet counts
+    const out = await execAsync('conntrack -L -o extended 2>/dev/null', 12000);
+    for (const line of out.split('\n')) {
+      if (!line.trim()) continue;
 
-async function ensureIptablesRule(ip) {
-  try {
-    // source rule (upload from device)
-    const chk1 = await execAsync(`iptables -C ${CHAIN} -s ${ip} 2>&1`).catch(() => 'missing');
-    if (chk1.includes('missing') || chk1.includes('No chain') || chk1.includes('does a matching')) {
-      await execAsync(`iptables -A ${CHAIN} -s ${ip}`);
-    }
-    // destination rule (download to device)
-    const chk2 = await execAsync(`iptables -C ${CHAIN} -d ${ip} 2>&1`).catch(() => 'missing');
-    if (chk2.includes('missing') || chk2.includes('No chain') || chk2.includes('does a matching')) {
-      await execAsync(`iptables -A ${CHAIN} -d ${ip}`);
-    }
-  } catch {
-    // non-fatal
-  }
-}
+      // Each conntrack line has two directions separated by a blank-ish boundary.
+      // Pattern: src=X dst=Y sport=A dport=B packets=N bytes=M [UNREPLIED] src=Y dst=X ...
+      // We parse all src=/dst=/bytes= tokens in order.
+      const tokens = line.matchAll(/(\w+)=([\d.:a-fA-F]+)/g);
+      const pairs = [];
+      for (const m of tokens) pairs.push({ k: m[1], v: m[2] });
 
-// Parse iptables -L NMT_BW -v -n --line-numbers output
-async function readIptablesBandwidth() {
-  try {
-    const out = await execAsync(`iptables -L ${CHAIN} -v -n -x`, 5000);
-    const lines = out.split('\n').slice(2); // skip chain header + column header
-    const byIp = {};
-    for (const line of lines) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length < 9) continue;
-      const bytes = parseInt(parts[1], 10);
-      // source IP is in parts[7], dest IP in parts[8]
-      const src = parts[7];
-      const dst = parts[8];
-      if (src && src !== '0.0.0.0/0' && !src.includes('/')) {
-        byIp[src] = (byIp[src] || { txBytes: 0, rxBytes: 0 });
-        byIp[src].txBytes += bytes;
-      }
-      if (dst && dst !== '0.0.0.0/0' && !dst.includes('/')) {
-        byIp[dst] = (byIp[dst] || { txBytes: 0, rxBytes: 0 });
-        byIp[dst].rxBytes += bytes;
+      // Walk through key=value pairs and collect (src, dst, bytes) tuples per direction
+      let curSrc = null, curDst = null;
+      for (const { k, v } of pairs) {
+        if (k === 'src') curSrc = v;
+        else if (k === 'dst') curDst = v;
+        else if (k === 'bytes') {
+          const b = parseInt(v, 10);
+          if (curSrc && curSrc.startsWith(lanSubnet)) {
+            byIp[curSrc] = byIp[curSrc] || { txBytes: 0, rxBytes: 0 };
+            byIp[curSrc].txBytes += b;
+          }
+          if (curDst && curDst.startsWith(lanSubnet)) {
+            byIp[curDst] = byIp[curDst] || { txBytes: 0, rxBytes: 0 };
+            byIp[curDst].rxBytes += b;
+          }
+          // reset for next direction pair
+          curSrc = null; curDst = null;
+        }
       }
     }
-    return byIp;
   } catch {
-    return {};
+    // conntrack not available or failed — return empty (UI shows 0 B gracefully)
   }
+
+  return byIp;
 }
 
 // ──────────────────────────────────────────────
@@ -116,20 +96,13 @@ async function readIptablesBandwidth() {
 router.get('/clients', async (req, res) => {
   try {
     const lanIface = NETWORK.lan.iface;
+    const lanSubnet = NETWORK.lan.ip.replace(/\.\d+$/, '.'); // e.g. "192.168.1."
 
-    // Ensure iptables chain is wired up (idempotent)
-    await ensureIptablesChain(lanIface);
-
-    // Read ARP table for live LAN devices
+    // ARP table for live LAN devices
     const arpDevices = readArpTable();
-
-    // Filter to LAN interface only
     const lanDevices = Object.values(arpDevices).filter(d => d.iface === lanIface);
 
-    // Ensure iptables rules exist for each device
-    await Promise.allSettled(lanDevices.map(d => ensureIptablesRule(d.ip)));
-
-    // Read DHCP leases for hostnames
+    // DHCP leases for hostnames
     const leases = parseLeases();
     const leaseByMac = {};
     const leaseByIp  = {};
@@ -138,25 +111,23 @@ router.get('/clients', async (req, res) => {
       leaseByIp[l.ip]   = l;
     }
 
-    // Read iptables bandwidth counters
-    const bwByIp = await readIptablesBandwidth();
+    // conntrack byte totals per IP — immediate, no warm-up needed
+    const bwByIp = await getBandwidthFromConntrack(lanSubnet);
 
-    // Build client list
     const clients = lanDevices.map(d => {
-      const lease    = leaseByMac[d.mac] || leaseByIp[d.ip];
-      const bw       = bwByIp[d.ip] || { txBytes: 0, rxBytes: 0 };
+      const lease = leaseByMac[d.mac] || leaseByIp[d.ip];
+      const bw    = bwByIp[d.ip] || { txBytes: 0, rxBytes: 0 };
       return {
-        ip:       d.ip,
-        mac:      d.mac,
-        hostname: lease?.hostname || null,
-        status:   'online',  // in ARP = recently active
-        txBytes:  bw.txBytes,
-        rxBytes:  bw.rxBytes,
+        ip:         d.ip,
+        mac:        d.mac,
+        hostname:   lease?.hostname || null,
+        status:     'online',
+        txBytes:    bw.txBytes,
+        rxBytes:    bw.rxBytes,
         totalBytes: bw.txBytes + bw.rxBytes,
       };
     });
 
-    // Sort by total bytes desc
     clients.sort((a, b) => b.totalBytes - a.totalBytes);
 
     res.json({
@@ -164,6 +135,7 @@ router.get('/clients', async (req, res) => {
       lanIface,
       lanIp: NETWORK.lan.ip,
       countersActive: Object.keys(bwByIp).length > 0,
+      dataSource: 'conntrack',
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
@@ -172,83 +144,88 @@ router.get('/clients', async (req, res) => {
 });
 
 // ──────────────────────────────────────────────
-// POST /api/network/clients/reset
-// Reset iptables byte counters (flush + re-add rules)
+// Service definitions — port → label/category
 // ──────────────────────────────────────────────
-router.post('/clients/reset', async (req, res) => {
-  try {
-    await execAsync(`iptables -Z ${CHAIN}`);
-    res.json({ ok: true, message: 'Bandwidth counters reset' });
-  } catch (err) {
-    res.status(500).json({ error: err.message || String(err) });
-  }
-});
+const SERVICE_PORTS = {
+  22:    { name: 'SSH',       category: 'remote' },
+  21:    { name: 'FTP',       category: 'remote' },
+  20:    { name: 'FTP-data',  category: 'remote' },
+  80:    { name: 'HTTP',      category: 'web' },
+  443:   { name: 'HTTPS',     category: 'web' },
+  8080:  { name: 'HTTP-alt',  category: 'web' },
+  8443:  { name: 'HTTPS-alt', category: 'web' },
+  27017: { name: 'MongoDB',   category: 'database' },
+  5432:  { name: 'PostgreSQL',category: 'database' },
+  3306:  { name: 'MySQL',     category: 'database' },
+  6379:  { name: 'Redis',     category: 'database' },
+  3000:  { name: 'Node/Dev',  category: 'web' },
+  5000:  { name: 'App',       category: 'web' },
+  9000:  { name: 'App',       category: 'web' },
+};
 
 // ──────────────────────────────────────────────
 // GET /api/network/wan-sessions
-// Active external (WAN) connections passing through this router
+// Who is connected to THIS machine's services (via ss -tnp)
 // ──────────────────────────────────────────────
 router.get('/wan-sessions', async (req, res) => {
   try {
-    // Use conntrack if available, fallback to ss
-    let sessions = [];
+    // ss -tnp: TCP, numeric, with process info
+    // We look at ESTAB connections where the LOCAL port matches a known service
+    const out = await execAsync('ss -tnp state established 2>/dev/null', 8000);
 
-    try {
-      // conntrack gives us the richest info: src, dst, bytes, state
-      const out = await execAsync(
-        `conntrack -L -p tcp --state ESTABLISHED 2>/dev/null | head -200`,
-        8000
-      );
-      sessions = parseConntrack(out);
-    } catch {
-      // conntrack not available — fall back to ss
-      try {
-        const out = await execAsync(`ss -tnp state established 2>/dev/null | tail -n +2`, 5000);
-        sessions = parseSsOutput(out);
-      } catch {
-        sessions = [];
-      }
-    }
-
-    // Tag each session: which WAN IP is the source/origin?
-    const wanIps = new Set([NETWORK.zte.ip, NETWORK.digisol.ip]);
-    const lanSubnet = NETWORK.lan.ip.replace(/\.\d+$/, '.'); // e.g. "192.168.1."
-
-    // Filter to sessions that have at least one WAN-side endpoint
-    // and one LAN-side endpoint (routed traffic)
-    const wanSessions = sessions.filter(s => {
-      const hasWan = wanIps.has(s.srcIp) || wanIps.has(s.dstIp);
-      const hasLan = s.srcIp.startsWith(lanSubnet) || s.dstIp.startsWith(lanSubnet);
-      // Also include sessions from LAN to internet (no WAN IP match needed — just non-RFC1918 dst)
-      const dstIsPublic = !isPrivateIp(s.dstIp);
-      const srcIsLan    = s.srcIp.startsWith(lanSubnet);
-      return hasWan || (srcIsLan && dstIsPublic) || (hasLan && hasWan);
-    });
-
-    // If conntrack failed, show all established external connections
-    const result = wanSessions.length > 0 ? wanSessions : sessions.filter(s => {
-      return !isPrivateIp(s.dstIp) || !isPrivateIp(s.srcIp);
-    });
-
-    // Read DHCP leases for hostname lookup
     const leases = parseLeases();
     const hostnameByIp = {};
-    for (const l of leases) {
-      if (l.hostname) hostnameByIp[l.ip] = l.hostname;
+    for (const l of leases) if (l.hostname) hostnameByIp[l.ip] = l.hostname;
+
+    const sessions = [];
+    for (const line of out.split('\n').slice(1)) { // skip header
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 5) continue;
+
+      // ss -tnp columns: State Recv-Q Send-Q Local Remote [Process]
+      const local  = parts[3];
+      const remote = parts[4];
+      const proc   = parts.slice(5).join(' ') || '';
+
+      const [localIp,  localPort]  = splitHostPort(local);
+      const [remoteIp, remotePort] = splitHostPort(remote);
+
+      if (!localIp || !remoteIp || !localPort) continue;
+
+      const lport = parseInt(localPort);
+      const rport = parseInt(remotePort);
+
+      // Only include connections where the LOCAL side is a known service port
+      const svc = SERVICE_PORTS[lport];
+      if (!svc) continue;
+
+      // Extract process name from "users:(("nginx",pid=123,fd=5))"
+      const procMatch = proc.match(/users:\(\("([^"]+)"/);
+      const processName = procMatch ? procMatch[1] : null;
+
+      sessions.push({
+        service:     svc.name,
+        category:    svc.category,
+        localPort:   lport,
+        remoteIp,
+        remotePort:  rport,
+        hostname:    hostnameByIp[remoteIp] || null,
+        process:     processName,
+        isLan:       !isPrivateIp(remoteIp) ? false : true,
+      });
     }
 
-    const enriched = result.map(s => ({
-      ...s,
-      srcHostname: hostnameByIp[s.srcIp] || null,
-      dstHostname: hostnameByIp[s.dstIp] || null,
-      wan: wanIps.has(s.srcIp) ? (s.srcIp === NETWORK.zte.ip ? 'ZTE' : 'DIGISOL')
-         : wanIps.has(s.dstIp) ? (s.dstIp === NETWORK.zte.ip ? 'ZTE' : 'DIGISOL')
-         : 'unknown',
-    }));
+    // Group by service for summary
+    const byService = {};
+    for (const s of sessions) {
+      byService[s.service] = (byService[s.service] || 0) + 1;
+    }
 
     res.json({
-      sessions: enriched,
-      total: enriched.length,
+      sessions,
+      byService,
+      total: sessions.length,
+      dataSource: 'ss',
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
@@ -276,36 +253,6 @@ function isPrivateIp(ip) {
     ip.startsWith('127.')       ||
     ip === '::1'
   );
-}
-
-/**
- * Parse `conntrack -L -p tcp --state ESTABLISHED` output
- * Example line:
- * tcp      6 431995 ESTABLISHED src=192.168.1.5 dst=142.250.80.46 sport=52100 dport=443 ...
- */
-function parseConntrack(out) {
-  const sessions = [];
-  for (const line of out.split('\n')) {
-    if (!line.includes('ESTABLISHED')) continue;
-    const src   = line.match(/src=([\d.]+)/)?.[1];
-    const dst   = line.match(/dst=([\d.]+)/)?.[1];
-    const sport = line.match(/sport=(\d+)/)?.[1];
-    const dport = line.match(/dport=(\d+)/)?.[1];
-    const bytes = line.match(/bytes=(\d+)/)?.[1];
-    const proto = line.match(/^(\w+)/)?.[1] || 'tcp';
-    if (src && dst) {
-      sessions.push({
-        proto:   proto.toLowerCase(),
-        srcIp:   src,
-        srcPort: sport ? parseInt(sport) : null,
-        dstIp:   dst,
-        dstPort: dport ? parseInt(dport) : null,
-        bytes:   bytes ? parseInt(bytes) : null,
-        state:   'ESTABLISHED',
-      });
-    }
-  }
-  return sessions;
 }
 
 /**
