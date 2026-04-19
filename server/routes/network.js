@@ -1,9 +1,9 @@
 /**
- * GET /api/network/clients      — LAN devices with bandwidth (nf_conntrack + DHCP)
+ * GET /api/network/clients      — LAN devices with bandwidth (conntrack + DHCP)
  * GET /api/network/wan-sessions — Who is connected to local services (ss)
  */
 const router = require('express').Router();
-const { exec } = require('child_process');
+const { exec, execSync } = require('child_process');
 const fs = require('fs');
 const { NETWORK } = require('../lib/networkConfig');
 const { parseLeases } = require('../lib/parser');
@@ -17,6 +17,9 @@ function execAsync(cmd, timeout = 10000) {
   });
 }
 
+// Keeps the previous counters to compute transfer rate deltas per client.
+const lastClientCounters = new Map();
+
 // ──────────────────────────────────────────────
 // ARP table → discover live LAN devices
 // ──────────────────────────────────────────────
@@ -28,8 +31,8 @@ function readArpTable() {
     for (const line of lines) {
       const parts = line.trim().split(/\s+/);
       if (parts.length < 6) continue;
-      const ip    = parts[0];
-      const mac   = parts[3];
+      const ip = parts[0];
+      const mac = parts[3];
       const iface = parts[5];
       if (mac === '00:00:00:00:00:00') continue;
       devices[ip] = { ip, mac: mac.toLowerCase(), iface };
@@ -40,54 +43,94 @@ function readArpTable() {
   }
 }
 
-// ──────────────────────────────────────────────
-// /proc/net/nf_conntrack — kernel conntrack table
-// Readable without root. Each line example:
-//   ipv4 2 tcp 6 431999 ESTABLISHED src=192.168.1.5 dst=142.250.0.1 sport=52100 dport=443 packets=10 bytes=1240 src=142.250.0.1 dst=192.168.1.5 sport=443 dport=52100 packets=8 bytes=9800 [ASSURED] mark=0 ...
-// ──────────────────────────────────────────────
-function readNfConntrack(lanSubnet) {
+function parseConntrackLines(content, lanSubnet) {
   const byIp = {};
-  let available = false;
 
-  try {
-    const content = fs.readFileSync('/proc/net/nf_conntrack', 'utf8');
-    available = true;
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
 
-    for (const line of content.split('\n')) {
-      if (!line.trim()) continue;
-
-      // Collect all key=value tokens in order; group by direction (reset on src=)
-      const dirs = [];
-      let cur = null;
-      for (const m of line.matchAll(/(\w+)=([\d.]+)/g)) {
-        const k = m[1], v = m[2];
-        if (k === 'src') { cur = { src: v }; dirs.push(cur); }
-        else if (cur) {
-          if (k === 'dst')    cur.dst   = v;
-          if (k === 'bytes')  cur.bytes = parseInt(v, 10);
-        }
-      }
-
-      // dirs[0] = original direction (LAN→remote), dirs[1] = reply (remote→LAN)
-      if (dirs.length < 1) continue;
-      const orig  = dirs[0];
-      const reply = dirs[1];
-
-      // Credit bytes to the LAN IP
-      if (orig.src && orig.src.startsWith(lanSubnet) && orig.bytes) {
-        byIp[orig.src] = byIp[orig.src] || { txBytes: 0, rxBytes: 0 };
-        byIp[orig.src].txBytes += orig.bytes;
-      }
-      if (reply && reply.dst && reply.dst.startsWith(lanSubnet) && reply.bytes) {
-        byIp[reply.dst] = byIp[reply.dst] || { txBytes: 0, rxBytes: 0 };
-        byIp[reply.dst].rxBytes += reply.bytes;
+    // Collect key=value tokens in order; reset direction grouping on src=
+    const dirs = [];
+    let cur = null;
+    for (const m of line.matchAll(/(\w+)=([\d.]+)/g)) {
+      const k = m[1];
+      const v = m[2];
+      if (k === 'src') {
+        cur = { src: v };
+        dirs.push(cur);
+      } else if (cur) {
+        if (k === 'dst') cur.dst = v;
+        if (k === 'bytes') cur.bytes = parseInt(v, 10);
       }
     }
-  } catch {
-    // file not readable — fall through, available stays false
+
+    // dirs[0] = original direction (LAN→remote), dirs[1] = reply (remote→LAN)
+    if (dirs.length < 1) continue;
+    const orig = dirs[0];
+    const reply = dirs[1];
+
+    // Credit bytes to the LAN IP
+    if (orig.src && orig.src.startsWith(lanSubnet) && orig.bytes) {
+      byIp[orig.src] = byIp[orig.src] || { txBytes: 0, rxBytes: 0 };
+      byIp[orig.src].txBytes += orig.bytes;
+    }
+    if (reply && reply.dst && reply.dst.startsWith(lanSubnet) && reply.bytes) {
+      byIp[reply.dst] = byIp[reply.dst] || { txBytes: 0, rxBytes: 0 };
+      byIp[reply.dst].rxBytes += reply.bytes;
+    }
   }
 
-  return { byIp, available };
+  return byIp;
+}
+
+function readConntrackCounters(lanSubnet) {
+  const fileSources = ['/proc/net/nf_conntrack', '/proc/net/ip_conntrack'];
+
+  for (const file of fileSources) {
+    try {
+      const content = fs.readFileSync(file, 'utf8');
+      return {
+        byIp: parseConntrackLines(content, lanSubnet),
+        available: true,
+        source: file,
+      };
+    } catch {
+      // try next source
+    }
+  }
+
+  // Fallback: userspace conntrack tool (works on some systems where /proc files are hidden)
+  try {
+    const out = execSync('conntrack -L -o extended 2>/dev/null', {
+      encoding: 'utf8',
+      timeout: 6000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+
+    return {
+      byIp: parseConntrackLines(out, lanSubnet),
+      available: true,
+      source: 'conntrack-cli',
+    };
+  } catch {
+    return { byIp: {}, available: false, source: 'none' };
+  }
+}
+
+function computeRate(nowMs, ip, txBytes, rxBytes) {
+  const prev = lastClientCounters.get(ip);
+  let txRateBps = 0;
+  let rxRateBps = 0;
+
+  if (prev) {
+    const dtSec = (nowMs - prev.tsMs) / 1000;
+    if (dtSec > 0) {
+      txRateBps = Math.max(0, (txBytes - prev.txBytes) / dtSec);
+      rxRateBps = Math.max(0, (rxBytes - prev.rxBytes) / dtSec);
+    }
+  }
+
+  return { txRateBps, rxRateBps, totalRateBps: txRateBps + rxRateBps };
 }
 
 // ──────────────────────────────────────────────
@@ -95,7 +138,7 @@ function readNfConntrack(lanSubnet) {
 // ──────────────────────────────────────────────
 router.get('/clients', async (req, res) => {
   try {
-    const lanIface  = NETWORK.lan.iface;
+    const lanIface = NETWORK.lan.iface;
     const lanSubnet = NETWORK.lan.ip.replace(/\.\d+$/, '.'); // e.g. "192.168.1."
 
     // 1. Live LAN devices from ARP
@@ -104,38 +147,65 @@ router.get('/clients', async (req, res) => {
 
     // 2. DHCP leases → hostnames (also include devices seen in leases but not ARP)
     const leases = parseLeases();
-    const leaseByMac = {}, leaseByIp = {};
-    for (const l of leases) { leaseByMac[l.mac] = l; leaseByIp[l.ip] = l; }
+    const leaseByMac = {};
+    const leaseByIp = {};
+    for (const l of leases) {
+      leaseByMac[l.mac] = l;
+      leaseByIp[l.ip] = l;
+    }
 
-    // 3. Per-IP byte totals from kernel conntrack table (no root needed)
-    const { byIp: bwByIp, available } = readNfConntrack(lanSubnet);
+    // 3. Per-IP byte totals from conntrack sources
+    const { byIp: bwByIp, available, source } = readConntrackCounters(lanSubnet);
 
-    // 4. Build client list — ARP devices (online now) enriched with DHCP + bw
+    // 4. Build client list — ARP devices (online now) enriched with DHCP + bw + rates
+    const nowMs = Date.now();
+    const nextClientCounters = new Map();
+
     const clients = lanDevices.map(d => {
       const lease = leaseByMac[d.mac] || leaseByIp[d.ip];
-      const bw    = bwByIp[d.ip] || { txBytes: 0, rxBytes: 0 };
+      const bw = bwByIp[d.ip] || { txBytes: 0, rxBytes: 0 };
+      const rates = computeRate(nowMs, d.ip, bw.txBytes, bw.rxBytes);
+
+      nextClientCounters.set(d.ip, {
+        txBytes: bw.txBytes,
+        rxBytes: bw.rxBytes,
+        tsMs: nowMs,
+      });
+
       return {
-        ip:         d.ip,
-        mac:        d.mac,
-        hostname:   lease?.hostname || null,
-        status:     'online',
-        txBytes:    bw.txBytes,
-        rxBytes:    bw.rxBytes,
+        ip: d.ip,
+        mac: d.mac,
+        hostname: lease?.hostname || null,
+        status: 'online',
+        txBytes: bw.txBytes,
+        rxBytes: bw.rxBytes,
         totalBytes: bw.txBytes + bw.rxBytes,
+        txRateBps: rates.txRateBps,
+        rxRateBps: rates.rxRateBps,
+        totalRateBps: rates.totalRateBps,
       };
     });
+
+    // Update cache after building the response to avoid partial state on errors.
+    lastClientCounters.clear();
+    for (const [ip, state] of nextClientCounters.entries()) {
+      lastClientCounters.set(ip, state);
+    }
+
     clients.sort((a, b) => b.totalBytes - a.totalBytes);
 
     const hasData = clients.some(c => c.totalBytes > 0);
+    const hasRateData = clients.some(c => c.totalRateBps > 0);
 
     res.json({
       clients,
       lanIface,
-      lanIp:          NETWORK.lan.ip,
+      lanIp: NETWORK.lan.ip,
       countersActive: hasData,
+      ratesActive: hasRateData,
       nfConntrackAvailable: available,
-      dataSource:     available ? 'nf_conntrack' : 'none',
-      timestamp:      new Date().toISOString(),
+      dataSource: source,
+      timestamp: new Date().toISOString(),
     });
   } catch (err) {
     res.status(500).json({ error: err.message || String(err) });
@@ -146,20 +216,20 @@ router.get('/clients', async (req, res) => {
 // Service definitions — port → label/category
 // ──────────────────────────────────────────────
 const SERVICE_PORTS = {
-  22:    { name: 'SSH',       category: 'remote' },
-  21:    { name: 'FTP',       category: 'remote' },
-  20:    { name: 'FTP-data',  category: 'remote' },
-  80:    { name: 'HTTP',      category: 'web' },
-  443:   { name: 'HTTPS',     category: 'web' },
-  8080:  { name: 'HTTP-alt',  category: 'web' },
-  8443:  { name: 'HTTPS-alt', category: 'web' },
-  27017: { name: 'MongoDB',   category: 'database' },
-  5432:  { name: 'PostgreSQL',category: 'database' },
-  3306:  { name: 'MySQL',     category: 'database' },
-  6379:  { name: 'Redis',     category: 'database' },
-  3000:  { name: 'Node/Dev',  category: 'web' },
-  5000:  { name: 'App',       category: 'web' },
-  9000:  { name: 'App',       category: 'web' },
+  22: { name: 'SSH', category: 'remote' },
+  21: { name: 'FTP', category: 'remote' },
+  20: { name: 'FTP-data', category: 'remote' },
+  80: { name: 'HTTP', category: 'web' },
+  443: { name: 'HTTPS', category: 'web' },
+  8080: { name: 'HTTP-alt', category: 'web' },
+  8443: { name: 'HTTPS-alt', category: 'web' },
+  27017: { name: 'MongoDB', category: 'database' },
+  5432: { name: 'PostgreSQL', category: 'database' },
+  3306: { name: 'MySQL', category: 'database' },
+  6379: { name: 'Redis', category: 'database' },
+  3000: { name: 'Node/Dev', category: 'web' },
+  5000: { name: 'App', category: 'web' },
+  9000: { name: 'App', category: 'web' },
 };
 
 // ──────────────────────────────────────────────
@@ -187,28 +257,27 @@ router.get('/wan-sessions', async (req, res) => {
       );
       if (!m) continue;
 
-      const localIp   = m[3];
-      const localPort = parseInt(m[4]);
-      const remoteIp  = m[5];
-      const remotePort= parseInt(m[6]);
-      const procRaw   = m[7] || '';
+      const localPort = parseInt(m[4], 10);
+      const remoteIp = m[5];
+      const remotePort = parseInt(m[6], 10);
+      const procRaw = m[7] || '';
 
       const svc = SERVICE_PORTS[localPort];
       if (!svc) continue;
 
       // Extract process name from users:(("mongod",pid=123,fd=5))
-      const procMatch   = procRaw.match(/users:\(\("([^"]+)"/);
+      const procMatch = procRaw.match(/users:\(\("([^"]+)"/);
       const processName = procMatch ? procMatch[1] : null;
 
       sessions.push({
-        service:    svc.name,
-        category:   svc.category,
+        service: svc.name,
+        category: svc.category,
         localPort,
         remoteIp,
         remotePort,
-        hostname:   hostnameByIp[remoteIp] || null,
-        process:    processName,
-        isLan:      isPrivateIp(remoteIp),
+        hostname: hostnameByIp[remoteIp] || null,
+        process: processName,
+        isLan: isPrivateIp(remoteIp),
       });
     }
 
@@ -237,54 +306,19 @@ router.get('/wan-sessions', async (req, res) => {
 function isPrivateIp(ip) {
   if (!ip) return true;
   return (
-    ip.startsWith('10.')        ||
-    ip.startsWith('172.16.')    || ip.startsWith('172.17.')  ||
-    ip.startsWith('172.18.')    || ip.startsWith('172.19.')  ||
-    ip.startsWith('172.20.')    || ip.startsWith('172.21.')  ||
-    ip.startsWith('172.22.')    || ip.startsWith('172.23.')  ||
-    ip.startsWith('172.24.')    || ip.startsWith('172.25.')  ||
-    ip.startsWith('172.26.')    || ip.startsWith('172.27.')  ||
-    ip.startsWith('172.28.')    || ip.startsWith('172.29.')  ||
-    ip.startsWith('172.30.')    || ip.startsWith('172.31.')  ||
-    ip.startsWith('192.168.')   ||
-    ip.startsWith('127.')       ||
+    ip.startsWith('10.') ||
+    ip.startsWith('172.16.') || ip.startsWith('172.17.') ||
+    ip.startsWith('172.18.') || ip.startsWith('172.19.') ||
+    ip.startsWith('172.20.') || ip.startsWith('172.21.') ||
+    ip.startsWith('172.22.') || ip.startsWith('172.23.') ||
+    ip.startsWith('172.24.') || ip.startsWith('172.25.') ||
+    ip.startsWith('172.26.') || ip.startsWith('172.27.') ||
+    ip.startsWith('172.28.') || ip.startsWith('172.29.') ||
+    ip.startsWith('172.30.') || ip.startsWith('172.31.') ||
+    ip.startsWith('192.168.') ||
+    ip.startsWith('127.') ||
     ip === '::1'
   );
-}
-
-/**
- * Parse `ss -tnp state established` output
- * Example: ESTAB 0 0 192.168.1.5:52100 142.250.80.46:443 ...
- */
-function parseSsOutput(out) {
-  const sessions = [];
-  for (const line of out.split('\n')) {
-    const parts = line.trim().split(/\s+/);
-    if (parts.length < 5) continue;
-    const local  = parts[3];
-    const remote = parts[4];
-    const [srcIp, srcPort]  = splitHostPort(local);
-    const [dstIp, dstPort]  = splitHostPort(remote);
-    if (srcIp && dstIp) {
-      sessions.push({
-        proto:   'tcp',
-        srcIp,
-        srcPort: srcPort ? parseInt(srcPort) : null,
-        dstIp,
-        dstPort: dstPort ? parseInt(dstPort) : null,
-        bytes:   null,
-        state:   'ESTABLISHED',
-      });
-    }
-  }
-  return sessions;
-}
-
-function splitHostPort(hostport) {
-  if (!hostport) return [null, null];
-  const last = hostport.lastIndexOf(':');
-  if (last < 0) return [hostport, null];
-  return [hostport.slice(0, last), hostport.slice(last + 1)];
 }
 
 module.exports = router;

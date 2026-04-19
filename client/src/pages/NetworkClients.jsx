@@ -14,6 +14,11 @@ function fmtBytes(bytes) {
   return (bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
 }
 
+function fmtRate(bytesPerSec) {
+  if (bytesPerSec == null || isNaN(bytesPerSec)) return '—';
+  return `${fmtBytes(bytesPerSec)}/s`;
+}
+
 function BwBar({ value, max }) {
   if (!max || !value) return null;
   const pct = Math.min(100, Math.round((value / max) * 100));
@@ -124,7 +129,7 @@ function LanSection({ toast }) {
           background: 'rgba(240,180,41,0.08)', border: '1px solid rgba(240,180,41,0.25)',
           borderRadius: 8, padding: '10px 14px', marginBottom: 14, fontSize: 12, color: 'var(--yellow)',
         }}>
-          Bandwidth data unavailable — <code>/proc/net/nf_conntrack</code> is not readable. Device list and hostnames are still shown from ARP + DHCP leases.
+          Bandwidth data unavailable — no readable conntrack source was found. Device list and hostnames are still shown from ARP + DHCP leases.
         </div>
       )}
       {data && data.nfConntrackAvailable && !data.countersActive && (
@@ -132,7 +137,7 @@ function LanSection({ toast }) {
           background: 'rgba(47,129,247,0.06)', border: '1px solid rgba(47,129,247,0.2)',
           borderRadius: 8, padding: '10px 14px', marginBottom: 14, fontSize: 12, color: 'var(--accent2)',
         }}>
-          Conntrack available — bytes will populate as devices make connections. Reload in a moment.
+          Conntrack source <code>{data.dataSource}</code> is available — bytes and rates populate as devices make connections.
         </div>
       )}
 
@@ -151,6 +156,8 @@ function LanSection({ toast }) {
                   <th>Hostname</th>
                   <th>Upload (TX)</th>
                   <th>Download (RX)</th>
+                  <th>TX Rate</th>
+                  <th>RX Rate</th>
                   <th>Total</th>
                   <th>Usage</th>
                 </tr>
@@ -158,7 +165,7 @@ function LanSection({ toast }) {
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text2)', padding: 32 }}>
+                    <td colSpan={10} style={{ textAlign: 'center', color: 'var(--text2)', padding: 32 }}>
                       {clients.length === 0 ? 'No LAN devices found in ARP table' : 'No devices match filter'}
                     </td>
                   </tr>
@@ -176,6 +183,12 @@ function LanSection({ toast }) {
                     <td style={{ fontVariantNumeric: 'tabular-nums' }}>
                       <span style={{ color: 'var(--accent2)' }}>{fmtBytes(c.rxBytes)}</span>
                     </td>
+                    <td style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--yellow)' }}>
+                      {fmtRate(c.txRateBps)}
+                    </td>
+                    <td style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--accent2)' }}>
+                      {fmtRate(c.rxRateBps)}
+                    </td>
                     <td style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
                       {fmtBytes(c.totalBytes)}
                     </td>
@@ -190,7 +203,7 @@ function LanSection({ toast }) {
         )}
         {data && (
           <div style={{ padding: '8px 14px', fontSize: 11, color: 'var(--text2)', borderTop: '1px solid var(--border)' }}>
-            {clients.length} device{clients.length !== 1 ? 's' : ''} online · Cumulative bytes via iptables accounting · Auto-refreshes every 15s
+            {clients.length} device{clients.length !== 1 ? 's' : ''} online · Source: {data.dataSource || 'none'} · Auto-refreshes every 15s
           </div>
         )}
       </div>
