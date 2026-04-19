@@ -94,8 +94,23 @@ function addBytes(byIp, ip, field, bytes) {
   byIp[ip][field] += bytes;
 }
 
+function runFirstAvailable(commands, opts) {
+  for (const cmd of commands) {
+    try {
+      return execSync(cmd, opts);
+    } catch {
+      // try next command
+    }
+  }
+  return null;
+}
+
 function readConntrackCounters(lanSubnet) {
-  const fileSources = ['/proc/net/nf_conntrack', '/proc/net/ip_conntrack'];
+  const fileSources = [
+    '/proc/net/nf_conntrack',
+    '/proc/net/ip_conntrack',
+    '/proc/net/netfilter/nf_conntrack',
+  ];
 
   for (const file of fileSources) {
     try {
@@ -111,21 +126,28 @@ function readConntrackCounters(lanSubnet) {
   }
 
   // Fallback: userspace conntrack tool (works on some systems where /proc files are hidden)
-  try {
-    const out = execSync('conntrack -L -o extended 2>/dev/null', {
+  const out = runFirstAvailable(
+    [
+      '/usr/sbin/conntrack -L -o extended 2>/dev/null',
+      '/sbin/conntrack -L -o extended 2>/dev/null',
+      'conntrack -L -o extended 2>/dev/null',
+    ],
+    {
       encoding: 'utf8',
       timeout: 6000,
       maxBuffer: 8 * 1024 * 1024,
-    });
+    }
+  );
 
+  if (out) {
     return {
       byIp: parseConntrackLines(out, lanSubnet),
       available: true,
       source: 'conntrack-cli',
     };
-  } catch {
-    return { byIp: {}, available: false, source: 'none' };
   }
+
+  return { byIp: {}, available: false, source: 'none' };
 }
 
 function parseIptablesLines(content, lanSubnet) {
@@ -145,6 +167,12 @@ function parseIptablesLines(content, lanSubnet) {
 
 function readIptablesCounters(lanSubnet) {
   const cmds = [
+    '/usr/sbin/iptables -w -t mangle -nvx -L FORWARD 2>/dev/null',
+    '/usr/sbin/iptables -w -t filter -nvx -L FORWARD 2>/dev/null',
+    '/usr/sbin/iptables-legacy -t mangle -nvx -L FORWARD 2>/dev/null',
+    '/sbin/iptables -w -t mangle -nvx -L FORWARD 2>/dev/null',
+    '/sbin/iptables -w -t filter -nvx -L FORWARD 2>/dev/null',
+    '/sbin/iptables-legacy -t mangle -nvx -L FORWARD 2>/dev/null',
     'iptables -w -t mangle -nvx -L FORWARD 2>/dev/null',
     'iptables -w -t filter -nvx -L FORWARD 2>/dev/null',
     'iptables-legacy -t mangle -nvx -L FORWARD 2>/dev/null',
@@ -191,18 +219,26 @@ function parseNftRulesetCounters(content, lanSubnet) {
 }
 
 function readNftablesCounters(lanSubnet) {
-  try {
-    const out = execSync('nft list ruleset -a 2>/dev/null', {
+  const out = runFirstAvailable(
+    [
+      '/usr/sbin/nft list ruleset -a 2>/dev/null',
+      '/sbin/nft list ruleset -a 2>/dev/null',
+      'nft list ruleset -a 2>/dev/null',
+    ],
+    {
       encoding: 'utf8',
       timeout: 5000,
       maxBuffer: 4 * 1024 * 1024,
-    });
+    }
+  );
+
+  if (out) {
     const byIp = parseNftRulesetCounters(out, lanSubnet);
     const available = Object.keys(byIp).length > 0;
     return { byIp, available, source: available ? 'nftables' : 'none' };
-  } catch {
-    return { byIp: {}, available: false, source: 'none' };
   }
+
+  return { byIp: {}, available: false, source: 'none' };
 }
 
 function readLanCounters(lanSubnet) {
