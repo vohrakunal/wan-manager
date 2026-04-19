@@ -7,6 +7,7 @@ const { exec, execSync } = require('child_process');
 const fs = require('fs');
 const { NETWORK } = require('../lib/networkConfig');
 const { parseLeases } = require('../lib/parser');
+const LanClientSnapshot = require('../models/LanClientSnapshot');
 
 function execAsync(cmd, timeout = 10000) {
   return new Promise((resolve, reject) => {
@@ -83,6 +84,16 @@ function parseConntrackLines(content, lanSubnet) {
   return byIp;
 }
 
+function isHostIpv4(ip) {
+  return /^\d+\.\d+\.\d+\.\d+$/.test(ip || '');
+}
+
+function addBytes(byIp, ip, field, bytes) {
+  if (!isHostIpv4(ip) || !Number.isFinite(bytes) || bytes < 0) return;
+  byIp[ip] = byIp[ip] || { txBytes: 0, rxBytes: 0 };
+  byIp[ip][field] += bytes;
+}
+
 function readConntrackCounters(lanSubnet) {
   const fileSources = ['/proc/net/nf_conntrack', '/proc/net/ip_conntrack'];
 
@@ -117,6 +128,96 @@ function readConntrackCounters(lanSubnet) {
   }
 }
 
+function parseIptablesLines(content, lanSubnet) {
+  const byIp = {};
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+\S+\s+\S+\s+\S+\s+\S+\s+(\S+)\s+(\S+)/);
+    if (!m) continue;
+    const bytes = parseInt(m[2], 10);
+    const src = m[3];
+    const dst = m[4];
+    if (src && src.startsWith(lanSubnet)) addBytes(byIp, src, 'txBytes', bytes);
+    if (dst && dst.startsWith(lanSubnet)) addBytes(byIp, dst, 'rxBytes', bytes);
+  }
+  return byIp;
+}
+
+function readIptablesCounters(lanSubnet) {
+  const cmds = [
+    'iptables -w -t mangle -nvx -L FORWARD 2>/dev/null',
+    'iptables -w -t filter -nvx -L FORWARD 2>/dev/null',
+    'iptables-legacy -t mangle -nvx -L FORWARD 2>/dev/null',
+  ];
+
+  const merged = {};
+  let readable = false;
+
+  for (const cmd of cmds) {
+    try {
+      const out = execSync(cmd, {
+        encoding: 'utf8',
+        timeout: 4000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      readable = true;
+      const part = parseIptablesLines(out, lanSubnet);
+      for (const [ip, bw] of Object.entries(part)) {
+        merged[ip] = merged[ip] || { txBytes: 0, rxBytes: 0 };
+        merged[ip].txBytes += bw.txBytes || 0;
+        merged[ip].rxBytes += bw.rxBytes || 0;
+      }
+    } catch {
+      // keep trying other variants
+    }
+  }
+
+  const available = readable && Object.keys(merged).length > 0;
+  return { byIp: merged, available, source: available ? 'iptables' : 'none' };
+}
+
+function parseNftRulesetCounters(content, lanSubnet) {
+  const byIp = {};
+  for (const line of content.split('\n')) {
+    if (!line.includes('counter') || !line.includes('bytes')) continue;
+
+    const tx = line.match(/ip saddr (\d+\.\d+\.\d+\.\d+).*counter packets \d+ bytes (\d+)/);
+    if (tx && tx[1].startsWith(lanSubnet)) addBytes(byIp, tx[1], 'txBytes', parseInt(tx[2], 10));
+
+    const rx = line.match(/ip daddr (\d+\.\d+\.\d+\.\d+).*counter packets \d+ bytes (\d+)/);
+    if (rx && rx[1].startsWith(lanSubnet)) addBytes(byIp, rx[1], 'rxBytes', parseInt(rx[2], 10));
+  }
+  return byIp;
+}
+
+function readNftablesCounters(lanSubnet) {
+  try {
+    const out = execSync('nft list ruleset -a 2>/dev/null', {
+      encoding: 'utf8',
+      timeout: 5000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const byIp = parseNftRulesetCounters(out, lanSubnet);
+    const available = Object.keys(byIp).length > 0;
+    return { byIp, available, source: available ? 'nftables' : 'none' };
+  } catch {
+    return { byIp: {}, available: false, source: 'none' };
+  }
+}
+
+function readLanCounters(lanSubnet) {
+  const conntrack = readConntrackCounters(lanSubnet);
+  if (conntrack.available) return conntrack;
+
+  const iptables = readIptablesCounters(lanSubnet);
+  if (iptables.available) return iptables;
+
+  const nft = readNftablesCounters(lanSubnet);
+  if (nft.available) return nft;
+
+  return { byIp: {}, available: false, source: 'none' };
+}
+
 function computeRate(nowMs, ip, txBytes, rxBytes) {
   const prev = lastClientCounters.get(ip);
   let txRateBps = 0;
@@ -131,6 +232,38 @@ function computeRate(nowMs, ip, txBytes, rxBytes) {
   }
 
   return { txRateBps, rxRateBps, totalRateBps: txRateBps + rxRateBps };
+}
+
+function persistLanSnapshot({ nowMs, lanIface, lanIp, dataSource, countersAvailable, clients }) {
+  const bucketStart = new Date(Math.floor(nowMs / 60000) * 60000);
+  const lastSampleAt = new Date(nowMs);
+
+  const compactClients = clients.map(c => ({
+    ip: c.ip,
+    mac: c.mac,
+    hostname: c.hostname || null,
+    txBytes: c.txBytes || 0,
+    rxBytes: c.rxBytes || 0,
+    totalBytes: c.totalBytes || 0,
+    txRateBps: c.txRateBps || 0,
+    rxRateBps: c.rxRateBps || 0,
+    totalRateBps: c.totalRateBps || 0,
+  }));
+
+  return LanClientSnapshot.findOneAndUpdate(
+    { bucketStart, lanIface },
+    {
+      $set: {
+        lanIp,
+        dataSource,
+        countersAvailable,
+        lastSampleAt,
+        clients: compactClients,
+      },
+      $inc: { sampleCount: 1 },
+    },
+    { upsert: true, setDefaultsOnInsert: true }
+  ).exec();
 }
 
 // ──────────────────────────────────────────────
@@ -154,8 +287,8 @@ router.get('/clients', async (req, res) => {
       leaseByIp[l.ip] = l;
     }
 
-    // 3. Per-IP byte totals from conntrack sources
-    const { byIp: bwByIp, available, source } = readConntrackCounters(lanSubnet);
+    // 3. Per-IP byte totals from available accounting source
+    const { byIp: bwByIp, available, source } = readLanCounters(lanSubnet);
 
     // 4. Build client list — ARP devices (online now) enriched with DHCP + bw + rates
     const nowMs = Date.now();
@@ -196,6 +329,17 @@ router.get('/clients', async (req, res) => {
 
     const hasData = clients.some(c => c.totalBytes > 0);
     const hasRateData = clients.some(c => c.totalRateBps > 0);
+    const timestamp = new Date().toISOString();
+
+    // Persist minute-bucket snapshot (non-blocking)
+    persistLanSnapshot({
+      nowMs,
+      lanIface,
+      lanIp: NETWORK.lan.ip,
+      dataSource: source,
+      countersAvailable: available,
+      clients,
+    }).catch(() => {});
 
     res.json({
       clients,
@@ -205,8 +349,29 @@ router.get('/clients', async (req, res) => {
       ratesActive: hasRateData,
       nfConntrackAvailable: available,
       dataSource: source,
-      timestamp: new Date().toISOString(),
+      timestamp,
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+// Reset in-memory LAN rate cache (useful for manual recalibration/testing)
+router.post('/clients/reset', (req, res) => {
+  lastClientCounters.clear();
+  res.json({ success: true, message: 'LAN client rate cache cleared' });
+});
+
+// GET /api/network/clients/history
+// Minute-bucketed snapshots from MongoDB
+router.get('/clients/history', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 180, 1440);
+    const snapshots = await LanClientSnapshot.find({ lanIface: NETWORK.lan.iface })
+      .sort({ bucketStart: -1 })
+      .limit(limit)
+      .lean();
+    res.json(snapshots.reverse());
   } catch (err) {
     res.status(500).json({ error: err.message || String(err) });
   }
