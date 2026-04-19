@@ -37,6 +37,81 @@ function safeHost(raw) {
   return s;
 }
 
+function readTempC(path) {
+  try {
+    const raw = parseInt(fs.readFileSync(path, 'utf8').trim(), 10);
+    if (isNaN(raw) || raw <= 0) return null;
+    const c = raw > 1000 ? raw / 1000 : raw;
+    if (c < 1 || c > 150) return null;
+    return Math.round(c * 10) / 10;
+  } catch {
+    return null;
+  }
+}
+
+function scoreSensorText(text) {
+  const s = String(text || '').toLowerCase();
+  if (!s) return 0;
+  if (s.includes('package id')) return 120;
+  if (s.includes('x86_pkg_temp') || s.includes('tdie') || s.includes('tctl')) return 110;
+  if (s.includes('coretemp')) return 100;
+  if (s.includes('cpu') || s.includes('core') || s.includes('package')) return 90;
+  if (s.includes('soc')) return 60;
+  if (s.includes('acpitz') || s.includes('pch')) return 20;
+  return 40;
+}
+
+function detectCpuTemp() {
+  const candidates = [];
+
+  // thermal_zone* sensors
+  try {
+    for (const entry of fs.readdirSync('/sys/class/thermal')) {
+      if (!entry.startsWith('thermal_zone')) continue;
+      const base = `/sys/class/thermal/${entry}`;
+      const type = fs.readFileSync(`${base}/type`, 'utf8').trim();
+      const temp = readTempC(`${base}/temp`);
+      if (temp == null) continue;
+      const score = scoreSensorText(type);
+      candidates.push({
+        score,
+        temp,
+        source: `${base}/temp`,
+      });
+    }
+  } catch {}
+
+  // hwmon temp*_input sensors
+  try {
+    for (const hw of fs.readdirSync('/sys/class/hwmon')) {
+      if (!hw.startsWith('hwmon')) continue;
+      const base = `/sys/class/hwmon/${hw}`;
+      let name = '';
+      try { name = fs.readFileSync(`${base}/name`, 'utf8').trim(); } catch {}
+
+      for (const f of fs.readdirSync(base)) {
+        const m = f.match(/^temp(\d+)_input$/);
+        if (!m) continue;
+        const temp = readTempC(`${base}/${f}`);
+        if (temp == null) continue;
+
+        let label = '';
+        try { label = fs.readFileSync(`${base}/temp${m[1]}_label`, 'utf8').trim(); } catch {}
+        const score = scoreSensorText(`${name} ${label}`);
+        candidates.push({
+          score,
+          temp,
+          source: `${base}/${f}`,
+        });
+      }
+    }
+  } catch {}
+
+  if (candidates.length === 0) return { cpuTemp: null, cpuTempSource: null };
+  candidates.sort((a, b) => b.score - a.score || b.temp - a.temp);
+  return { cpuTemp: candidates[0].temp, cpuTempSource: candidates[0].source };
+}
+
 // GET /api/diagnostics/ping  (SSE)
 router.get('/ping', (req, res) => {
   sseSetup(res);
@@ -139,22 +214,7 @@ router.get('/sysinfo', (req, res) => {
         cpuPct = dTotal > 0 ? Math.round((1 - dIdle / dTotal) * 1000) / 10 : 0;
       }
 
-      // Read CPU temperature from thermal zones
-      let cpuTemp = null;
-      const thermalPaths = [
-        '/sys/class/thermal/thermal_zone0/temp',
-        '/sys/class/thermal/thermal_zone1/temp',
-        '/sys/class/hwmon/hwmon0/temp1_input',
-      ];
-      for (const p of thermalPaths) {
-        try {
-          const raw = parseInt(fs.readFileSync(p, 'utf8').trim(), 10);
-          if (!isNaN(raw) && raw > 0) {
-            cpuTemp = Math.round(raw / 100) / 10; // millidegrees → °C
-            break;
-          }
-        } catch {}
-      }
+      const { cpuTemp, cpuTempSource } = detectCpuTemp();
 
       res.json({
         hostname: os.hostname(),
@@ -166,6 +226,7 @@ router.get('/sysinfo', (req, res) => {
         cpuCount: cpus.length,
         cpuPct,
         cpuTemp,
+        cpuTempSource,
         loadAvg: loadAvg.map(v => Math.round(v * 100) / 100),
         totalMem,
         freeMem,

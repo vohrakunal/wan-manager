@@ -79,9 +79,16 @@ export default function SysInfo() {
             Load: {info.loadAvg?.join(' / ')}
           </div>
           {info.cpuTemp != null && (
-            <div style={{ fontSize: 11, color: tempColor, marginTop: 2 }}>
-              Temp: {info.cpuTemp}°C
-            </div>
+            <>
+              <div style={{ fontSize: 11, color: tempColor, marginTop: 2 }}>
+                Temp: {info.cpuTemp}°C
+              </div>
+              {info.cpuTempSource && (
+                <div style={{ fontSize: 10, color: 'var(--text2)', marginTop: 1, fontFamily: 'monospace' }}>
+                  Sensor: {info.cpuTempSource}
+                </div>
+              )}
+            </>
           )}
         </div>
 
