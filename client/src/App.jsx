@@ -17,25 +17,39 @@ import { ToastProvider } from './components/Toast.jsx';
 import './App.css';
 
 function ProtectedLayout() {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
   return (
     <div className="app-layout">
-      <Sidebar />
-      <main className="app-main">
-        <Routes>
-          <Route path="/"            element={<Navigate to="/dashboard" replace />} />
-          <Route path="/dashboard"   element={<Dashboard />} />
-          <Route path="/failover"    element={<Failover />} />
-          <Route path="/routing"     element={<RoutingTables />} />
-          <Route path="/dhcp"        element={<DhcpLeases />} />
-          <Route path="/logs"        element={<LiveLogs />} />
-          <Route path="/diagnostics" element={<Diagnostics />} />
-          <Route path="/terminal"    element={<Terminal />} />
-          <Route path="/services"    element={<Services />} />
-          <Route path="/files"       element={<FileManager />} />
-          <Route path="/health"      element={<HealthCheck />} />
-          <Route path="/clients"     element={<NetworkClients />} />
-        </Routes>
-      </main>
+      <div
+        className={`sidebar-overlay${sidebarOpen ? ' open' : ''}`}
+        onClick={() => setSidebarOpen(false)}
+      />
+      <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      <div className="content-wrapper">
+        <div className="mobile-topbar">
+          <button className="hamburger" onClick={() => setSidebarOpen(true)} aria-label="Open menu">
+            ☰
+          </button>
+          <span className="mobile-topbar-title">🌐 WAN Manager</span>
+        </div>
+        <main className="app-main">
+          <Routes>
+            <Route path="/"            element={<Navigate to="/dashboard" replace />} />
+            <Route path="/dashboard"   element={<Dashboard />} />
+            <Route path="/failover"    element={<Failover />} />
+            <Route path="/routing"     element={<RoutingTables />} />
+            <Route path="/dhcp"        element={<DhcpLeases />} />
+            <Route path="/logs"        element={<LiveLogs />} />
+            <Route path="/diagnostics" element={<Diagnostics />} />
+            <Route path="/terminal"    element={<Terminal />} />
+            <Route path="/services"    element={<Services />} />
+            <Route path="/files"       element={<FileManager />} />
+            <Route path="/health"      element={<HealthCheck />} />
+            <Route path="/clients"     element={<NetworkClients />} />
+          </Routes>
+        </main>
+      </div>
     </div>
   );
 }
