@@ -66,7 +66,7 @@ const styles = {
   },
   card: {
     background: 'var(--bg2)', border: '1px solid var(--border)',
-    borderRadius: 12, padding: '40px 36px', width: 360,
+    borderRadius: 12, padding: '40px 36px', width: 'calc(100% - 32px)', maxWidth: 360,
     textAlign: 'center',
   },
   logo: { fontSize: 40, marginBottom: 12 },

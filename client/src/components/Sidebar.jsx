@@ -15,7 +15,7 @@ const NAV = [
   { path: '/terminal',    label: 'Terminal',         icon: '⌨️' },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({ isOpen, onClose }) {
   const navigate = useNavigate();
 
   function logout() {
@@ -24,76 +24,35 @@ export default function Sidebar() {
   }
 
   return (
-    <aside style={styles.sidebar}>
-      <div style={styles.brand}>
-        <span style={styles.brandIcon}>🌐</span>
+    <aside className={`sidebar${isOpen ? ' open' : ''}`}>
+      <div className="sidebar-brand">
+        <span className="sidebar-brand-icon">🌐</span>
         <div>
-          <div style={styles.brandName}>WAN Manager</div>
-          <div style={styles.brandSub}>Dual-WAN Router</div>
+          <div className="sidebar-brand-name">WAN Manager</div>
+          <div className="sidebar-brand-sub">Dual-WAN Router</div>
         </div>
+        <button className="sidebar-close-btn" onClick={onClose} aria-label="Close menu">✕</button>
       </div>
 
-      <nav style={styles.nav}>
+      <nav className="sidebar-nav">
         {NAV.map(item => (
           <NavLink
             key={item.path}
             to={item.path}
-            style={({ isActive }) => ({ ...styles.link, ...(isActive ? styles.linkActive : {}) })}
+            onClick={onClose}
+            className={({ isActive }) => `sidebar-link${isActive ? ' sidebar-link-active' : ''}`}
           >
-            <span style={styles.linkIcon}>{item.icon}</span>
+            <span className="sidebar-link-icon">{item.icon}</span>
             {item.label}
           </NavLink>
         ))}
       </nav>
 
-      <div style={styles.footer}>
-        <button onClick={logout} style={styles.logoutBtn}>
+      <div className="sidebar-footer">
+        <button onClick={logout} className="sidebar-logout-btn">
           <span>⬡</span> Logout
         </button>
       </div>
     </aside>
   );
 }
-
-const styles = {
-  sidebar: {
-    width: 'var(--sidebar-w)',
-    minWidth: 'var(--sidebar-w)',
-    background: 'var(--bg2)',
-    borderRight: '1px solid var(--border)',
-    display: 'flex',
-    flexDirection: 'column',
-    height: '100vh',
-    overflow: 'hidden',
-  },
-  brand: {
-    display: 'flex', alignItems: 'center', gap: 10,
-    padding: '20px 16px 16px',
-    borderBottom: '1px solid var(--border)',
-  },
-  brandIcon: { fontSize: 24 },
-  brandName: { fontSize: 14, fontWeight: 700, color: 'var(--text)' },
-  brandSub:  { fontSize: 11, color: 'var(--text2)' },
-  nav: { flex: 1, padding: '12px 8px', display: 'flex', flexDirection: 'column', gap: 2 },
-  link: {
-    display: 'flex', alignItems: 'center', gap: 10,
-    padding: '9px 10px', borderRadius: 6,
-    color: 'var(--text2)', fontSize: 13, fontWeight: 500,
-    transition: 'background 0.12s, color 0.12s',
-  },
-  linkActive: {
-    background: 'rgba(47,129,247,0.15)',
-    color: 'var(--accent2)',
-  },
-  linkIcon: { fontSize: 16, width: 20, textAlign: 'center' },
-  footer: {
-    padding: '12px 8px',
-    borderTop: '1px solid var(--border)',
-  },
-  logoutBtn: {
-    width: '100%', display: 'flex', alignItems: 'center', gap: 8,
-    padding: '9px 10px', borderRadius: 6,
-    background: 'transparent', color: 'var(--text2)', fontSize: 13,
-    transition: 'background 0.12s, color 0.12s',
-  },
-};
