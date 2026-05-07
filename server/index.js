@@ -19,6 +19,7 @@ const filesRoutes       = require('./routes/files');
 const networkRoutes     = require('./routes/network');
 const { router: camerasRoutes, go2rtcProxy } = require('./routes/cameras');
 const { setupTerminalWss } = require('./routes/terminal');
+const { WebSocketServer } = require('ws');
 
 const app = express();
 const server = http.createServer(app);
@@ -59,6 +60,27 @@ app.use('/api/cameras',     camerasRoutes);
 
 // WebSocket terminal
 setupTerminalWss(server);
+
+// Proxy WebSocket connections for go2rtc (/api/cameras/go2rtc/api/ws?src=...)
+// go2rtc uses WS for MSE/WebRTC signalling; we tunnel it to localhost:1984
+const go2rtcWss = new WebSocketServer({ noServer: true });
+server.on('upgrade', (req, socket, head) => {
+  if (!req.url.startsWith('/api/cameras/go2rtc/')) return;
+  go2rtcWss.handleUpgrade(req, socket, head, (ws) => {
+    const subpath = req.url.replace('/api/cameras/go2rtc', '');
+    const upstream = new (require('ws'))(
+      `ws://127.0.0.1:${process.env.GO2RTC_PORT || 1984}${subpath}`
+    );
+    upstream.on('open', () => {
+      ws.on('message', (data, isBinary) => upstream.readyState === 1 && upstream.send(data, { binary: isBinary }));
+      upstream.on('message', (data, isBinary) => ws.readyState === 1 && ws.send(data, { binary: isBinary }));
+    });
+    upstream.on('close', () => ws.close());
+    ws.on('close', () => upstream.close());
+    upstream.on('error', () => ws.close());
+    ws.on('error', () => upstream.close());
+  });
+});
 
 // Serve React build in production
 if (process.env.NODE_ENV === 'production') {

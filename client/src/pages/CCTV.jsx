@@ -1,76 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getCameras, addCamera, updateCamera, deleteCamera } from '../api/index.js';
 
-const MIME = 'video/mp4; codecs="avc1.640029"';
+function streamUrl(cameraId) {
+  return `/api/cameras/go2rtc/index.html?src=${encodeURIComponent(cameraId)}&mode=mse,webrtc`;
+}
 
 function CameraFeed({ camera, onSelect, selected, fullscreen }) {
-  const videoRef = useRef(null);
-  const [err, setErr] = useState(null);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !window.MediaSource || !MediaSource.isTypeSupported(MIME)) {
-      setErr('MSE not supported in this browser');
-      return;
-    }
-
-    const ms = new MediaSource();
-    const srcUrl = URL.createObjectURL(ms);
-    video.src = srcUrl;
-
-    const abort = new AbortController();
-    let sb = null;
-    const queue = [];
-    let appending = false;
-
-    function pump() {
-      if (appending || queue.length === 0 || sb.updating) return;
-      appending = true;
-      sb.appendBuffer(queue.shift());
-    }
-
-    ms.addEventListener('sourceopen', async () => {
-      try {
-        sb = ms.addSourceBuffer(MIME);
-      } catch (e) {
-        setErr('Codec not supported: ' + e.message);
-        return;
-      }
-      sb.mode = 'sequence';
-      sb.addEventListener('updateend', () => { appending = false; pump(); });
-
-      let res;
-      try {
-        res = await fetch(`/api/cameras/go2rtc/api/stream.mp4?src=${encodeURIComponent(camera.id)}`, {
-          headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` },
-          signal: abort.signal,
-        });
-      } catch (e) {
-        if (e.name !== 'AbortError') setErr('Fetch failed');
-        return;
-      }
-      if (!res.ok) { setErr(`HTTP ${res.status}`); return; }
-
-      const reader = res.body.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          queue.push(value);
-          pump();
-        }
-      } catch (e) {
-        if (e.name !== 'AbortError') setErr('Stream ended');
-      }
-    }, { once: true });
-
-    video.play().catch(() => {});
-
-    return () => {
-      abort.abort();
-      URL.revokeObjectURL(srcUrl);
-    };
-  }, [camera.id]);
+  const iframeRef = useRef(null);
 
   return (
     <div
@@ -86,17 +22,13 @@ function CameraFeed({ camera, onSelect, selected, fullscreen }) {
       }}
       onClick={() => onSelect(camera)}
     >
-      {err ? (
-        <div style={{ color: '#f66', fontSize: 12, padding: 16, textAlign: 'center', paddingTop: '20%' }}>{err}</div>
-      ) : (
-        <video
-          ref={videoRef}
-          autoPlay
-          muted
-          playsInline
-          style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain' }}
-        />
-      )}
+      <iframe
+        ref={iframeRef}
+        src={streamUrl(camera.id)}
+        style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
+        allow="autoplay"
+        title={camera.name}
+      />
       <div style={{
         position: 'absolute', bottom: 0, left: 0, right: 0,
         padding: '6px 10px',
