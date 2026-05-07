@@ -1,9 +1,74 @@
 const router = require('express').Router();
 const { exec } = require('child_process');
+const fs = require('fs');
 const { readProcNetDev } = require('../lib/parser');
 const ThroughputSnapshot = require('../models/ThroughputSnapshot');
-const WanStatusSnapshot = require('../models/WanStatusSnapshot');
 const { NETWORK: INTERFACES } = require('../lib/networkConfig');
+
+const FAILOVER_LOG = process.env.FAILOVER_LOG || '/var/log/wan-failover.log';
+
+// Parse a single log line into { timestamp, zte, digisol } or null
+// Log formats seen:
+//   "2026-05-07 09:45:05 OK: DIGISOL only (ZTE still down)"
+//   "2026-05-07 12:36:03 RESTORED: Both WANs up — ECMP 50:50 active"
+//   "2026-05-07 12:37:03 OK: Both WANs up — ECMP 50:50 active"
+//   "2026-05-07 XX:XX:XX OK: ZTE only (DIGISOL still down)"
+//   "2026-05-07 XX:XX:XX CRITICAL: Both WANs down"
+function parseLogLine(line) {
+  const m = line.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(.+)$/);
+  if (!m) return null;
+  const ts  = new Date(m[1]);
+  const msg = m[2].toLowerCase();
+
+  // Both down
+  if (msg.includes('critical') || (msg.includes('both') && msg.includes('down'))) {
+    return { timestamp: ts, zte: 'down', digisol: 'down' };
+  }
+  // Both up
+  if (msg.includes('both') && (msg.includes('up') || msg.includes('ecmp'))) {
+    return { timestamp: ts, zte: 'up', digisol: 'up' };
+  }
+  // Only DIGISOL up (ZTE down)
+  if (msg.includes('digisol only') || msg.includes('zte still down') || msg.includes('zte down')) {
+    return { timestamp: ts, zte: 'down', digisol: 'up' };
+  }
+  // Only ZTE up (DIGISOL down)
+  if (msg.includes('zte only') || msg.includes('digisol still down') || msg.includes('digisol down')) {
+    return { timestamp: ts, zte: 'up', digisol: 'down' };
+  }
+  return null;
+}
+
+// Read the failover log and return per-WAN up/down segments within the time window
+function parseStatusTimeline(hours) {
+  const since = new Date(Date.now() - hours * 3600 * 1000);
+  const now   = new Date();
+
+  if (!fs.existsSync(FAILOVER_LOG)) {
+    return { zte: [], digisol: [], since: since.toISOString(), now: now.toISOString() };
+  }
+
+  const content = fs.readFileSync(FAILOVER_LOG, 'utf8');
+  const entries = content.split('\n')
+    .map(parseLogLine)
+    .filter(e => e && e.timestamp >= since);
+
+  function toSegments(wan) {
+    const segments = [];
+    let seg = null;
+    for (const e of entries) {
+      const st = e[wan];
+      if (!seg || seg.status !== st) {
+        if (seg) { seg.end = e.timestamp.toISOString(); segments.push(seg); }
+        seg = { status: st, start: e.timestamp.toISOString(), end: null };
+      }
+    }
+    if (seg) { seg.end = now.toISOString(); segments.push(seg); }
+    return segments;
+  }
+
+  return { zte: toSegments('zte'), digisol: toSegments('digisol'), since: since.toISOString(), now: now.toISOString() };
+}
 
 // Cache for throughput rate calculation (needs two readings)
 let prevNetDev = null;
@@ -130,12 +195,6 @@ router.get('/status', async (req, res) => {
       digisol: { rxBytes: status.digisol.rxBytes, txBytes: status.digisol.txBytes, rxRate: status.digisol.rxRate, txRate: status.digisol.txRate },
     }).catch(() => {});
 
-    // Persist WAN up/down status snapshot (non-blocking)
-    WanStatusSnapshot.create({
-      zte:     status.zte.status,
-      digisol: status.digisol.status,
-    }).catch(() => {});
-
     res.json(status);
   } catch (err) {
     res.status(500).json({ error: err.message || err });
@@ -191,36 +250,11 @@ router.get('/latency', async (req, res) => {
 });
 
 // GET /api/wan/status-timeline?hours=24
-// Returns raw snapshots collapsed into contiguous up/down segments for both WANs
-router.get('/status-timeline', async (req, res) => {
+// Parses /var/log/wan-failover.log and returns per-WAN up/down segments
+router.get('/status-timeline', (req, res) => {
   try {
     const hours = Math.min(parseInt(req.query.hours) || 24, 168);
-    const since = new Date(Date.now() - hours * 3600 * 1000);
-    const snapshots = await WanStatusSnapshot.find({ timestamp: { $gte: since } })
-      .sort({ timestamp: 1 })
-      .lean();
-
-    // Collapse consecutive same-status records into segments
-    function toSegments(wan) {
-      const segments = [];
-      let seg = null;
-      for (const s of snapshots) {
-        const st = s[wan];
-        if (!seg || seg.status !== st) {
-          if (seg) { seg.end = s.timestamp; segments.push(seg); }
-          seg = { status: st, start: s.timestamp, end: null };
-        }
-      }
-      if (seg) { seg.end = new Date(); segments.push(seg); }
-      return segments;
-    }
-
-    res.json({
-      zte:     toSegments('zte'),
-      digisol: toSegments('digisol'),
-      since:   since.toISOString(),
-      now:     new Date().toISOString(),
-    });
+    res.json(parseStatusTimeline(hours));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
