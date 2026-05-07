@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { getCameras, addCamera, updateCamera, deleteCamera } from '../api/index.js';
 
 // go2rtc WebRTC player URL — proxied through our Express server so it's auth-gated
+// Token passed as query param because iframes can't send Authorization headers
 function streamUrl(cameraId) {
-  return `/api/cameras/go2rtc/webrtc.html?src=${encodeURIComponent(cameraId)}&autoplay=1&muted=1`;
+  const token = localStorage.getItem('token') || '';
+  return `/api/cameras/go2rtc/webrtc.html?src=${encodeURIComponent(cameraId)}&autoplay=1&muted=1&token=${token}`;
 }
 
 function CameraFeed({ camera, onSelect, selected, fullscreen }) {

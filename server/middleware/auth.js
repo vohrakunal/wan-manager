@@ -5,7 +5,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
 function isStreamGetRequest(req) {
   return req.method === 'GET' && (
     req.path.startsWith('/stream/') ||
-    req.path.startsWith('/diagnostics/')
+    req.path.startsWith('/diagnostics/') ||
+    req.path.startsWith('/cameras/go2rtc') ||
+    req.path.startsWith('/cameras/stream/')
   );
 }
 
