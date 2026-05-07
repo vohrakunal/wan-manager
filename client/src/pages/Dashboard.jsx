@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
 import WanCard from '../components/WanCard.jsx';
 import SysInfo from '../components/SysInfo.jsx';
-import { getWanStatus, getWanPublicIp, getThroughputHistory } from '../api/index.js';
+import UptimeTimeline from '../components/UptimeTimeline.jsx';
+import { getWanStatus, getWanPublicIp, getThroughputHistory, getStatusTimeline } from '../api/index.js';
 
 function ModeBar({ mode }) {
   return (
@@ -31,6 +32,8 @@ export default function Dashboard() {
   const [history, setHistory] = useState({ zte: [], digisol: [] });
   const [lastUpdate, setLastUpdate] = useState(null);
   const [error, setError] = useState('');
+  const [timelineData, setTimelineData] = useState(null);
+  const [timelineHours, setTimelineHours] = useState(24);
   const sseRef = useRef(null);
 
   async function fetchPublicIps() {
@@ -49,11 +52,23 @@ export default function Dashboard() {
     } catch {}
   }
 
+  async function fetchTimeline(hours) {
+    try {
+      const { data } = await getStatusTimeline(hours);
+      setTimelineData(data);
+    } catch {}
+  }
+
+  useEffect(() => {
+    fetchTimeline(timelineHours);
+  }, [timelineHours]);
+
   useEffect(() => {
     // Initial data
     getWanStatus().then(({ data }) => setStatus(data)).catch(e => setError(e.message));
     fetchPublicIps();
     fetchHistory();
+    fetchTimeline(timelineHours);
 
     // SSE for live updates
     const token = localStorage.getItem('token');
@@ -84,11 +99,14 @@ export default function Dashboard() {
     const statusTimer = setInterval(() => {
       getWanStatus().then(({ data }) => setStatus(data)).catch(() => {});
     }, 30000);
+    // Refresh timeline every 60s
+    const timelineTimer = setInterval(() => fetchTimeline(timelineHours), 60000);
 
     return () => {
       evtSrc.close();
       clearInterval(ipTimer);
       clearInterval(statusTimer);
+      clearInterval(timelineTimer);
     };
   }, []);
 
@@ -128,6 +146,15 @@ export default function Dashboard() {
       <div className="grid-2">
         <WanCard label="ZTE (WAN 1)"     isp="Netplus Broadband"  wan={zteData}     history={history.zte} />
         <WanCard label="DIGISOL (WAN 2)" isp="Falconet Internet"  wan={digisolData} history={history.digisol} />
+      </div>
+
+      {/* Uptime Timeline */}
+      <div className="card" style={{ marginTop: 20 }}>
+        <UptimeTimeline
+          data={timelineData}
+          hours={timelineHours}
+          onHoursChange={h => { setTimelineHours(h); setTimelineData(null); }}
+        />
       </div>
 
       {/* System Info */}

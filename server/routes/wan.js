@@ -2,6 +2,7 @@ const router = require('express').Router();
 const { exec } = require('child_process');
 const { readProcNetDev } = require('../lib/parser');
 const ThroughputSnapshot = require('../models/ThroughputSnapshot');
+const WanStatusSnapshot = require('../models/WanStatusSnapshot');
 const { NETWORK: INTERFACES } = require('../lib/networkConfig');
 
 // Cache for throughput rate calculation (needs two readings)
@@ -129,6 +130,12 @@ router.get('/status', async (req, res) => {
       digisol: { rxBytes: status.digisol.rxBytes, txBytes: status.digisol.txBytes, rxRate: status.digisol.rxRate, txRate: status.digisol.txRate },
     }).catch(() => {});
 
+    // Persist WAN up/down status snapshot (non-blocking)
+    WanStatusSnapshot.create({
+      zte:     status.zte.status,
+      digisol: status.digisol.status,
+    }).catch(() => {});
+
     res.json(status);
   } catch (err) {
     res.status(500).json({ error: err.message || err });
@@ -181,6 +188,42 @@ router.get('/latency', async (req, res) => {
     curlLatency(INTERFACES.digisol.iface),
   ]);
   res.json({ zte: zte.value, digisol: digisol.value });
+});
+
+// GET /api/wan/status-timeline?hours=24
+// Returns raw snapshots collapsed into contiguous up/down segments for both WANs
+router.get('/status-timeline', async (req, res) => {
+  try {
+    const hours = Math.min(parseInt(req.query.hours) || 24, 168);
+    const since = new Date(Date.now() - hours * 3600 * 1000);
+    const snapshots = await WanStatusSnapshot.find({ timestamp: { $gte: since } })
+      .sort({ timestamp: 1 })
+      .lean();
+
+    // Collapse consecutive same-status records into segments
+    function toSegments(wan) {
+      const segments = [];
+      let seg = null;
+      for (const s of snapshots) {
+        const st = s[wan];
+        if (!seg || seg.status !== st) {
+          if (seg) { seg.end = s.timestamp; segments.push(seg); }
+          seg = { status: st, start: s.timestamp, end: null };
+        }
+      }
+      if (seg) { seg.end = new Date(); segments.push(seg); }
+      return segments;
+    }
+
+    res.json({
+      zte:     toSegments('zte'),
+      digisol: toSegments('digisol'),
+      since:   since.toISOString(),
+      now:     new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;

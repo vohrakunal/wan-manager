@@ -29,6 +29,7 @@ export const getWanStatus     = ()   => api.get('/wan/status');
 export const getWanPublicIp   = ()   => api.get('/wan/publicip');
 export const getWanLatency    = ()   => api.get('/wan/latency');
 export const getThroughputHistory = (limit = 150) => api.get(`/wan/throughput/history?limit=${limit}`);
+export const getStatusTimeline    = (hours = 24)  => api.get(`/wan/status-timeline?hours=${hours}`);
 
 // Failover
 export const setECMP          = ()        => api.post('/failover/ecmp');
