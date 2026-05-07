@@ -1,15 +1,66 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getCameras, addCamera, updateCamera, deleteCamera } from '../api/index.js';
 
-// go2rtc WebRTC player URL — proxied through our Express server so it's auth-gated
-// Token passed as query param because iframes can't send Authorization headers
-function streamUrl(cameraId) {
-  const token = localStorage.getItem('token') || '';
-  return `/api/cameras/go2rtc/webrtc.html?src=${encodeURIComponent(cameraId)}&autoplay=1&muted=1&token=${token}`;
+// go2rtc MSE stream — pure HTTP chunked MP4, proxied through Express (no WebSocket/UDP needed)
+function mseStreamUrl(cameraId) {
+  return `/api/cameras/go2rtc/api/stream.mp4?src=${encodeURIComponent(cameraId)}`;
 }
 
 function CameraFeed({ camera, onSelect, selected, fullscreen }) {
-  const iframeRef = useRef(null);
+  const videoRef = useRef(null);
+  const msRef = useRef(null);
+  const sbRef = useRef(null);
+  const queueRef = useRef([]);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!window.MediaSource) { setErr('MSE not supported'); return; }
+    const ms = new MediaSource();
+    msRef.current = ms;
+    const video = videoRef.current;
+    video.src = URL.createObjectURL(ms);
+
+    let abortCtrl = new AbortController();
+
+    ms.addEventListener('sourceopen', async () => {
+      let sb;
+      try {
+        sb = ms.addSourceBuffer('video/mp4; codecs="avc1.640029,mp4a.40.2"');
+      } catch {
+        try { sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"'); } catch (e) { setErr('Codec unsupported'); return; }
+      }
+      sbRef.current = sb;
+
+      const flush = () => {
+        if (sb.updating || queueRef.current.length === 0) return;
+        sb.appendBuffer(queueRef.current.shift());
+      };
+      sb.addEventListener('updateend', flush);
+
+      try {
+        const res = await fetch(mseStreamUrl(camera.id), {
+          headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` },
+          signal: abortCtrl.signal,
+        });
+        if (!res.ok) { setErr(`Stream error ${res.status}`); return; }
+        const reader = res.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          queueRef.current.push(value);
+          flush();
+        }
+      } catch (e) {
+        if (e.name !== 'AbortError') setErr('Stream disconnected');
+      }
+    }, { once: true });
+
+    video.play().catch(() => {});
+    return () => {
+      abortCtrl.abort();
+      URL.revokeObjectURL(video.src);
+    };
+  }, [camera.id]);
 
   return (
     <div
@@ -25,13 +76,17 @@ function CameraFeed({ camera, onSelect, selected, fullscreen }) {
       }}
       onClick={() => onSelect(camera)}
     >
-      <iframe
-        ref={iframeRef}
-        src={streamUrl(camera.id)}
-        style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
-        allow="autoplay; camera; microphone"
-        title={camera.name}
-      />
+      {err ? (
+        <div style={{ color: '#f66', fontSize: 12, padding: 16, textAlign: 'center', paddingTop: '20%' }}>{err}</div>
+      ) : (
+        <video
+          ref={videoRef}
+          autoPlay
+          muted
+          playsInline
+          style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain' }}
+        />
+      )}
       <div style={{
         position: 'absolute', bottom: 0, left: 0, right: 0,
         padding: '6px 10px',
