@@ -65,4 +65,10 @@ export const getLanClients    = ()  => api.get('/network/clients');
 export const resetBwCounters  = ()  => api.post('/network/clients/reset');
 export const getWanSessions   = ()  => api.get('/network/wan-sessions');
 
+// Cameras
+export const getCameras       = ()           => api.get('/cameras');
+export const addCamera        = (data)       => api.post('/cameras', data);
+export const updateCamera     = (id, data)   => api.put(`/cameras/${encodeURIComponent(id)}`, data);
+export const deleteCamera     = (id)         => api.delete(`/cameras/${encodeURIComponent(id)}`);
+
 export default api;
