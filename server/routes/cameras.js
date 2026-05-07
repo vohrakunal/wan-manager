@@ -4,7 +4,7 @@ const path = require('path');
 const { exec } = require('child_process');
 const http = require('http');
 
-const CAMERAS_FILE = process.env.CAMERAS_FILE || '/etc/nmt-panicle/cameras.json';
+const CAMERAS_FILE = process.env.CAMERAS_FILE || path.join(__dirname, '../../cameras.json');
 const GO2RTC_CONFIG = process.env.GO2RTC_CONFIG || '/etc/go2rtc.yaml';
 // go2rtc WebRTC HTTP API — bound to localhost only
 const GO2RTC_HOST = process.env.GO2RTC_HOST || '127.0.0.1';

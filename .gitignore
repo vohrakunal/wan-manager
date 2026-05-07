@@ -1,5 +1,6 @@
 .claude
 .env
+cameras.json
 node_modules
 dist
 build
