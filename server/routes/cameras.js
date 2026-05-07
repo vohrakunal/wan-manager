@@ -113,12 +113,6 @@ router.get('/stream/:id', (req, res) => {
   proxyGo2rtc(req, res, target);
 });
 
-// Proxy all go2rtc sub-paths (WebRTC signalling: /api/webrtc?src=..., /api/ws, etc.)
-router.use('/go2rtc/*', (req, res) => {
-  const subpath = req.path.replace(/^\/go2rtc/, '') + (Object.keys(req.query).length ? '?' + new URLSearchParams(req.query).toString() : '');
-  proxyGo2rtc(req, res, subpath);
-});
-
 function proxyGo2rtc(req, res, targetPath) {
   const options = {
     hostname: GO2RTC_HOST,
@@ -130,7 +124,6 @@ function proxyGo2rtc(req, res, targetPath) {
       host: `${GO2RTC_HOST}:${GO2RTC_PORT}`,
     },
   };
-  // Strip headers that would cause issues
   delete options.headers['authorization'];
 
   const proxy = http.request(options, upstream => {
@@ -141,4 +134,12 @@ function proxyGo2rtc(req, res, targetPath) {
   req.pipe(proxy);
 }
 
-module.exports = router;
+// Separate router mounted before auth middleware so go2rtc's own JS sub-requests
+// (fetch to /api/streams, /api/webrtc, etc.) can pass through without a token.
+const go2rtcProxy = require('express').Router();
+go2rtcProxy.use('/*', (req, res) => {
+  const subpath = req.path + (Object.keys(req.query).length ? '?' + new URLSearchParams(req.query).toString() : '');
+  proxyGo2rtc(req, res, subpath);
+});
+
+module.exports = { router, go2rtcProxy };

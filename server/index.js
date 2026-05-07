@@ -17,7 +17,7 @@ const diagnosticsRoutes = require('./routes/diagnostics');
 const servicesRoutes    = require('./routes/services');
 const filesRoutes       = require('./routes/files');
 const networkRoutes     = require('./routes/network');
-const camerasRoutes     = require('./routes/cameras');
+const { router: camerasRoutes, go2rtcProxy } = require('./routes/cameras');
 const { setupTerminalWss } = require('./routes/terminal');
 
 const app = express();
@@ -38,6 +38,10 @@ app.use(express.json());
 
 // Auth endpoint (no auth required)
 app.post('/api/auth/login', require('./routes/auth'));
+
+// go2rtc proxy — no auth on sub-requests because the HTML page's own JS fetches
+// these without headers; the iframe itself is only served after JWT auth passes.
+app.use('/api/cameras/go2rtc', go2rtcProxy);
 
 // Protected API routes
 app.use('/api', authMiddleware);
