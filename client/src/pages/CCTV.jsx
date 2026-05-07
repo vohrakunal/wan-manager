@@ -1,64 +1,74 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getCameras, addCamera, updateCamera, deleteCamera } from '../api/index.js';
 
-// go2rtc MSE stream — pure HTTP chunked MP4, proxied through Express (no WebSocket/UDP needed)
-function mseStreamUrl(cameraId) {
-  return `/api/cameras/go2rtc/api/stream.mp4?src=${encodeURIComponent(cameraId)}`;
-}
+const MIME = 'video/mp4; codecs="avc1.640029"';
 
 function CameraFeed({ camera, onSelect, selected, fullscreen }) {
   const videoRef = useRef(null);
-  const msRef = useRef(null);
-  const sbRef = useRef(null);
-  const queueRef = useRef([]);
   const [err, setErr] = useState(null);
 
   useEffect(() => {
-    if (!window.MediaSource) { setErr('MSE not supported'); return; }
-    const ms = new MediaSource();
-    msRef.current = ms;
     const video = videoRef.current;
-    video.src = URL.createObjectURL(ms);
+    if (!video || !window.MediaSource || !MediaSource.isTypeSupported(MIME)) {
+      setErr('MSE not supported in this browser');
+      return;
+    }
 
-    let abortCtrl = new AbortController();
+    const ms = new MediaSource();
+    const srcUrl = URL.createObjectURL(ms);
+    video.src = srcUrl;
+
+    const abort = new AbortController();
+    let sb = null;
+    const queue = [];
+    let appending = false;
+
+    function pump() {
+      if (appending || queue.length === 0 || sb.updating) return;
+      appending = true;
+      sb.appendBuffer(queue.shift());
+    }
 
     ms.addEventListener('sourceopen', async () => {
-      let sb;
       try {
-        sb = ms.addSourceBuffer('video/mp4; codecs="avc1.640029,mp4a.40.2"');
-      } catch {
-        try { sb = ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E"'); } catch (e) { setErr('Codec unsupported'); return; }
+        sb = ms.addSourceBuffer(MIME);
+      } catch (e) {
+        setErr('Codec not supported: ' + e.message);
+        return;
       }
-      sbRef.current = sb;
+      sb.mode = 'sequence';
+      sb.addEventListener('updateend', () => { appending = false; pump(); });
 
-      const flush = () => {
-        if (sb.updating || queueRef.current.length === 0) return;
-        sb.appendBuffer(queueRef.current.shift());
-      };
-      sb.addEventListener('updateend', flush);
-
+      let res;
       try {
-        const res = await fetch(mseStreamUrl(camera.id), {
+        res = await fetch(`/api/cameras/go2rtc/api/stream.mp4?src=${encodeURIComponent(camera.id)}`, {
           headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` },
-          signal: abortCtrl.signal,
+          signal: abort.signal,
         });
-        if (!res.ok) { setErr(`Stream error ${res.status}`); return; }
-        const reader = res.body.getReader();
+      } catch (e) {
+        if (e.name !== 'AbortError') setErr('Fetch failed');
+        return;
+      }
+      if (!res.ok) { setErr(`HTTP ${res.status}`); return; }
+
+      const reader = res.body.getReader();
+      try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          queueRef.current.push(value);
-          flush();
+          queue.push(value);
+          pump();
         }
       } catch (e) {
-        if (e.name !== 'AbortError') setErr('Stream disconnected');
+        if (e.name !== 'AbortError') setErr('Stream ended');
       }
     }, { once: true });
 
     video.play().catch(() => {});
+
     return () => {
-      abortCtrl.abort();
-      URL.revokeObjectURL(video.src);
+      abort.abort();
+      URL.revokeObjectURL(srcUrl);
     };
   }, [camera.id]);
 
